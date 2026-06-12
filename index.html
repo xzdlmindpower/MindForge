@@ -1575,11 +1575,12 @@ async function resolveLocalImages(newData) {
   // 弹窗让用户点按钮 → 新鲜的用户手势 → input.click() 不会被拦截
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:99999;display:flex;align-items:center;justify-content:center;';
-  overlay.innerHTML = `<div style="background:#fff;border-radius:16px;padding:36px 32px 28px;text-align:center;max-width:360px;width:90%;box-shadow:0 12px 40px rgba(0,0,0,0.25);font-family:system-ui,-apple-system,sans-serif;">
-    <div style="font-size:48px;margin-bottom:12px;line-height:1;">📷</div>
-    <div style="font-size:18px;font-weight:700;margin-bottom:6px;color:#1a1a1a;">检测到 ${needFnames.size} 个图片引用</div>
-    <div style="font-size:14px;color:#888;margin-bottom:20px;line-height:1.5;">请选择图片文件<br>（打开文件夹后 Ctrl+A 全选即可）</div>
-    <button id="_imgPickBtn" style="display:block;width:100%;background:var(--primary,#FF8F00);color:#fff;border:none;padding:14px 0;border-radius:10px;font-size:17px;font-weight:600;cursor:pointer;margin-bottom:10px;">选择图片</button>
+  overlay.innerHTML = `<div style="background:#fff;border-radius:16px;padding:36px 32px 28px;text-align:center;max-width:380px;width:90%;box-shadow:0 12px 40px rgba(0,0,0,0.25);font-family:system-ui,-apple-system,sans-serif;">
+    <div style="font-size:48px;margin-bottom:12px;line-height:1;">✅</div>
+    <div style="font-size:18px;font-weight:700;margin-bottom:6px;color:#1a1a1a;">题库导入完成</div>
+    <div style="font-size:14px;color:#888;margin-bottom:8px;line-height:1.5;">检测到 <b style="color:#FF8F00;">${needFnames.size}</b> 个图片引用</div>
+    <div style="font-size:13px;color:#aaa;margin-bottom:20px;line-height:1.5;">第二步：请手动点击按钮选择图片文件<br>（打开文件夹后按住 <b>Ctrl+A</b> 全选即可）</div>
+    <button id="_imgPickBtn" style="display:block;width:100%;background:var(--primary,#FF8F00);color:#fff;border:none;padding:14px 0;border-radius:10px;font-size:17px;font-weight:600;cursor:pointer;margin-bottom:10px;">选择图片文件</button>
     <button id="_imgSkipBtn" style="display:block;width:100%;background:transparent;border:none;color:#aaa;font-size:14px;cursor:pointer;padding:8px 0;">跳过（稍后导入）</button>
   </div>`;
   document.body.appendChild(overlay);
