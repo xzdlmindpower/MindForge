@@ -1553,7 +1553,9 @@ async function resolveImageSrc(qOrId) {
   return results.join('|');
 }
 
-// 导入 Excel 时，让用户选择图片文件夹，读取图片转 base64 存 IDB
+// 导入 Excel 时，让用户选择图片文件（多选），读取转 base64 存 IDB
+// 🔑 云端部署要点：file input 的 click() 必须在用户手势上下文里调用
+// 因此改为弹窗让用户主动点击按钮触发，避免在 onchange 回调里 programmatic click 被拦截
 async function resolveLocalImages(newData) {
   // 收集题库引用的所有本地图片文件名（小写去重）
   const needFnames = new Set();
@@ -1562,60 +1564,68 @@ async function resolveLocalImages(newData) {
   }
   if (!needFnames.size) return;
 
-  // 🔑 改用多文件选择（multiple）替代文件夹选择（webkitdirectory）
-  // webkitdirectory 在云端部署（HTTPS）会被浏览器拦截（需要用户手势，且每次手势只能弹一个选择器）
-  const folderInput = document.createElement('input');
-  folderInput.type = 'file';
-  folderInput.multiple = true;
-  folderInput.accept = 'image/*';
-  folderInput.style.display = 'none';
-  document.body.appendChild(folderInput);
-  // focus 回退：用户取消时也能继续（避免导入卡死）
-  let folderResolved = false;
-  const folderPromise = new Promise((resolve) => {
-    folderInput.onchange = () => { folderResolved = true; resolve(); };
-    const onFocus = () => { window.removeEventListener('focus', onFocus); if (!folderResolved) resolve(); };
-    window.addEventListener('focus', onFocus);
-    folderInput.click();
-  });
-
-  // 并行检查 IDB 缓存（用户浏览文件夹时不浪费等待时间）
+  // 预查 IDB 缓存
   const existsSet = await idbBatchCheck([...needFnames]);
   const toFetch = new Set([...needFnames].filter(fn => !existsSet.has(fn)));
-
-  // 等待用户完成文件夹选择
-  await folderPromise;
-  if (folderInput.parentNode) document.body.removeChild(folderInput);
-
-  if (!folderInput.files || !folderInput.files.length) return;
   if (!toFetch.size) {
     showToast('📷', `图片已全部缓存（${existsSet.size} 张），跳过`);
     return;
   }
 
-  // 只读取题库需要的文件（按文件名小写匹配，跳过无关文件和已缓存文件）
+  // 弹窗让用户点按钮 → 新鲜的用户手势 → input.click() 不会被拦截
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:99999;display:flex;align-items:center;justify-content:center;';
+  overlay.innerHTML = `<div style="background:#fff;border-radius:16px;padding:36px 32px 28px;text-align:center;max-width:360px;width:90%;box-shadow:0 12px 40px rgba(0,0,0,0.25);font-family:system-ui,-apple-system,sans-serif;">
+    <div style="font-size:48px;margin-bottom:12px;line-height:1;">📷</div>
+    <div style="font-size:18px;font-weight:700;margin-bottom:6px;color:#1a1a1a;">检测到 ${needFnames.size} 个图片引用</div>
+    <div style="font-size:14px;color:#888;margin-bottom:20px;line-height:1.5;">请选择图片文件<br>（打开文件夹后 Ctrl+A 全选即可）</div>
+    <button id="_imgPickBtn" style="display:block;width:100%;background:var(--primary,#FF8F00);color:#fff;border:none;padding:14px 0;border-radius:10px;font-size:17px;font-weight:600;cursor:pointer;margin-bottom:10px;">选择图片</button>
+    <button id="_imgSkipBtn" style="display:block;width:100%;background:transparent;border:none;color:#aaa;font-size:14px;cursor:pointer;padding:8px 0;">跳过（稍后导入）</button>
+  </div>`;
+  document.body.appendChild(overlay);
+
+  let files = null;
+  try {
+    files = await new Promise((resolve) => {
+      const skipBtn = document.getElementById('_imgSkipBtn');
+      const pickBtn = document.getElementById('_imgPickBtn');
+      skipBtn.onclick = () => { document.body.removeChild(overlay); resolve(null); };
+      pickBtn.onclick = () => {
+        // ✅ 用户点了按钮 → 新鲜的用户手势 → input.click() 正常工作
+        const imgInput = document.createElement('input');
+        imgInput.type = 'file';
+        imgInput.multiple = true;
+        imgInput.accept = 'image/*';
+        imgInput.onchange = () => { document.body.removeChild(overlay); resolve(imgInput.files); };
+        imgInput.click();
+      };
+    });
+  } catch (_) {
+    if (overlay.parentNode) document.body.removeChild(overlay);
+    return;
+  }
+  if (!files || !files.length) return;
+
+  // 按文件名小写匹配，跳过无关文件和已缓存文件
   const fileMap = new Map(); // key: 小写文件名 → dataURL
   const readPromises = [];
   let skippedFiles = 0;
-  for (const f of folderInput.files) {
+  for (const f of files) {
     const fn = f.name.toLowerCase();
-    if (fileMap.has(fn)) continue;           // 同名只读一次
-    if (!toFetch.has(fn)) { skippedFiles++; continue; } // 跳过无关/已缓存文件
-    const promise = new Promise((resolve) => {
+    if (fileMap.has(fn)) continue;
+    if (!toFetch.has(fn)) { skippedFiles++; continue; }
+    readPromises.push(new Promise((resolve) => {
       const reader = new FileReader();
       reader.onload = () => { fileMap.set(fn, reader.result); resolve(); };
       reader.onerror = () => resolve();
       reader.readAsDataURL(f);
-    });
-    readPromises.push(promise);
+    }));
   }
   await Promise.all(readPromises);
 
-  // 存入 IDB：key = 小写文件名, value = dataURL（按文件名去重，只存一份）
+  // 存入 IDB
   const entries = [];
-  for (const [fn, dataUrl] of fileMap) {
-    entries.push([fn, dataUrl]);
-  }
+  for (const [fn, dataUrl] of fileMap) entries.push([fn, dataUrl]);
   if (entries.length) {
     await idbBatchSet(entries);
     showToast('📷', `已缓存 ${entries.length} 张新图片（跳过 ${existsSet.size} 张已缓存，忽略 ${skippedFiles} 张无关文件）`);
@@ -2757,7 +2767,6 @@ async function importExcelOrCSV() {
     // 检测是否有本地图片路径（有则提示用户选择图片文件夹，转存到 IndexedDB）
     const hasLocalImg = newData.some(q => getLocalImagePaths(q).length > 0);
     if (hasLocalImg) {
-      showToast('📷', '检测到图片路径，请选择图片文件（可多选，用于离线/网页端显示图片）');
       await resolveLocalImages(newData);
     }
 
