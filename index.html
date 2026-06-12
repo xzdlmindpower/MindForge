@@ -1562,13 +1562,22 @@ async function resolveLocalImages(newData) {
   }
   if (!needFnames.size) return;
 
-  // 🔑 必须在任何 await 之前打开文件夹选择器（浏览器要求用户手势上下文）
+  // 🔑 改用多文件选择（multiple）替代文件夹选择（webkitdirectory）
+  // webkitdirectory 在云端部署（HTTPS）会被浏览器拦截（需要用户手势，且每次手势只能弹一个选择器）
   const folderInput = document.createElement('input');
   folderInput.type = 'file';
-  folderInput.webkitdirectory = true;
+  folderInput.multiple = true;
+  folderInput.accept = 'image/*';
   folderInput.style.display = 'none';
   document.body.appendChild(folderInput);
-  const folderPromise = new Promise((resolve) => { folderInput.onchange = resolve; folderInput.click(); });
+  // focus 回退：用户取消时也能继续（避免导入卡死）
+  let folderResolved = false;
+  const folderPromise = new Promise((resolve) => {
+    folderInput.onchange = () => { folderResolved = true; resolve(); };
+    const onFocus = () => { window.removeEventListener('focus', onFocus); if (!folderResolved) resolve(); };
+    window.addEventListener('focus', onFocus);
+    folderInput.click();
+  });
 
   // 并行检查 IDB 缓存（用户浏览文件夹时不浪费等待时间）
   const existsSet = await idbBatchCheck([...needFnames]);
@@ -2748,7 +2757,7 @@ async function importExcelOrCSV() {
     // 检测是否有本地图片路径（有则提示用户选择图片文件夹，转存到 IndexedDB）
     const hasLocalImg = newData.some(q => getLocalImagePaths(q).length > 0);
     if (hasLocalImg) {
-      showToast('📷', '检测到图片路径，请选择图片文件夹（用于离线/网页端显示图片）');
+      showToast('📷', '检测到图片路径，请选择图片文件（可多选，用于离线/网页端显示图片）');
       await resolveLocalImages(newData);
     }
 
