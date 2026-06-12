@@ -993,6 +993,11 @@ body {
             <span class="act-title">导入题库（Excel/CSV）</span>
             <span class="act-desc">支持.xlsx/.xls/.csv，保留特殊符号</span>
           </div>
+          <div class="action-btn" onclick="importImagesStandalone()">
+            <span class="act-icon">🖼️</span>
+            <span class="act-title">导入图片</span>
+            <span class="act-desc">选图片·自动匹配题库（第二步）</span>
+          </div>
           <div class="action-btn" onclick="syncCloudData()">
             <span class="act-icon">☁️</span>
             <span class="act-title">同步云端</span>
@@ -1013,11 +1018,6 @@ body {
             <span class="act-icon">📥</span>
             <span class="act-title">全量恢复</span>
             <span class="act-desc">导入JSON（100%还原）</span>
-          </div>
-          <div class="action-btn" onclick="copyBackupData()">
-            <span class="act-icon">📋</span>
-            <span class="act-title">复制备份</span>
-            <span class="act-desc">JSON写入剪贴板（跨设备）</span>
           </div>
           <!-- 第三行：导出与维护 -->
           <div class="action-btn" onclick="exportPureBankJSON()">
@@ -1633,6 +1633,16 @@ async function resolveLocalImages(newData) {
   } else {
     showToast('📷', '图片已全部缓存，跳过');
   }
+}
+
+// ===== 云端独立导入图片（第二步）=====
+// 与导入题库分开，独立用户手势 → 云端HTTPS不受限
+async function importImagesStandalone() {
+  if (!totalBank || !totalBank.length) {
+    showToast('⚠️', '请先导入题库（第一步），再导入图片（第二步）');
+    return;
+  }
+  await resolveLocalImages(totalBank);
 }
 
 // ============================ 合并/保存辅助 ============================
