@@ -1246,7 +1246,7 @@ body {
 
 <script>
 // ============================ 版本号 ============================
-var APP_VERSION = '5.5'; // 每次发版必须同步更新 version.json
+var APP_VERSION = '5.6'; // 每次发版必须同步更新 version.json
 
 // ============================ 存储 keys ============================
 const LS = {
@@ -2775,10 +2775,10 @@ async function importExcelOrCSV() {
     }).filter(r => r['题目ID']);
     if (!newData.length) { showToast('❌', '文件中没有有效的题目ID列（需要"题目ID"或"id"）'); return; }
 
-    // 检测是否有本地图片路径（有则提示用户选择图片文件夹，转存到 IndexedDB）
+    // 检测是否有本地图片路径（提示用户去第二步「导入图片」）
     const hasLocalImg = newData.some(q => getLocalImagePaths(q).length > 0);
     if (hasLocalImg) {
-      await resolveLocalImages(newData);
+      showToast('📷', `检测到图片引用，请点击「导入图片」按钮完成第二步`);
     }
 
     // 文件内去重：同ID取最后一条
