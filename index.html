@@ -948,11 +948,11 @@ body {
         <div id="reasonFilterTags" class="tag-group"></div>
       </div>
       <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap;">
-        <button class="btn btn-primary" onclick="startQuiz('all')">📖 全部顺序刷</button>
+        <button class="btn btn-primary" onclick="startQuiz('all')">📖 顺序练题</button>
         <button class="btn btn-primary" onclick="startQuiz('random')">🎲 随机练题</button>
         <button class="btn btn-primary" onclick="startDirectExam()" style="background:var(--primary-light);color:#fff;">⏱️ 模拟考试</button>
-        <button class="btn btn-secondary" onclick="startQuiz('wrong')">❌ 刷错题本</button>
-        <button class="btn btn-secondary" onclick="startQuiz('favorite')">⭐ 刷收藏夹</button>
+        <button class="btn btn-secondary" onclick="startQuiz('wrong')">❌ 错题练习</button>
+        <button class="btn btn-secondary" onclick="startQuiz('favorite')">⭐ 收藏练习</button>
         <button class="btn btn-secondary" onclick="startQuiz('review')">🔄 复习模式</button>
       </div>
       <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
@@ -1230,7 +1230,7 @@ body {
 
 <script>
 // ============================ 版本号 ============================
-var APP_VERSION = '1.0'; // 每次发版必须同步更新 version.json
+var APP_VERSION = '5.1'; // 每次发版必须同步更新 version.json
 
 // ============================ 存储 keys ============================
 const LS = {
@@ -1286,11 +1286,12 @@ function loadData(key, fallback) {
 let cb_cloud = [];     // 通用题库（云端同步）
 let cb_personal = [];  // 私有题库（仅本地）
 let totalBank = [];    // 运行时合并 = cb_cloud + cb_personal
+let totalBankMap = new Map(); // 题目ID → 题目对象
 let wrongList = [];
 let favList = [];
 let ankiData = {};
 let records = [];
-let settings = { autoNext: false, wrongStreak: 3, favStreak: 3, freqFirst: true, dailyGoal: 20 };
+let settings = { autoNext: true, wrongStreak: 3, favStreak: 3, freqFirst: true, dailyGoal: 50 };
 let todayRecord = { total: 0, correct: 0 };
 let correctStreak = {};
 
@@ -1307,8 +1308,299 @@ let lastBackupDate = null; // 最后一次备份时间
 let sessionCorrect = 0, sessionWrong = 0;
 let answerStatus = {};
 
+// ============================ IndexedDB 图片缓存 ============================
+const IMG_DB_NAME = 'cbImgDB';
+const IMG_DB_STORE = 'images';
+let _idbReady = null;
+function openImgDB() {
+  if (_idbReady) return _idbReady;
+  _idbReady = new Promise((resolve, reject) => {
+    const req = indexedDB.open(IMG_DB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IMG_DB_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return _idbReady;
+}
+function idbGetImage(key) {
+  return openImgDB().then(db => new Promise((resolve) => {
+    const tx = db.transaction(IMG_DB_STORE, 'readonly');
+    const store = tx.objectStore(IMG_DB_STORE);
+    const req = store.get(key);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => resolve(null);
+  }));
+}
+function idbBatchSet(entries) {
+  return openImgDB().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(IMG_DB_STORE, 'readwrite');
+    const store = tx.objectStore(IMG_DB_STORE);
+    entries.forEach(([k, v]) => store.put(v, k));
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  }));
+}
+// 解析题目图片字段，返回需处理的本地路径列表（非http/data:/blob:）
+function getLocalImagePaths(q) {
+  const raw = (q['图片'] || '').trim();
+  if (!raw) return [];
+  return raw.split('|').map(s => s.trim()).filter(s =>
+    s && !s.startsWith('http') && !s.startsWith('data:') && !s.startsWith('blob:')
+  );
+}
+// 从路径中提取文件名（不区分大小写，统一小写）
+function getFname(p) {
+  return p.replace(/\\/g, '/').split('/').pop().toLowerCase();
+}
+// 获取北京时间字符串（用户可见时间），格式同 toISOString 但基于本地时区
+function localISO(d) {
+  d = d || new Date();
+  const off = d.getTimezoneOffset();
+  const local = new Date(d.getTime() - off * 60000);
+  return local.toISOString().slice(0, -1); // 去掉 Z 后缀
+}
+// 批量检查 IDB 中是否已存在这些 key，返回已存在的 key 集合
+function idbBatchCheck(keys) {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IMG_DB_NAME, 1);
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction(IMG_DB_STORE, 'readonly');
+      const store = tx.objectStore(IMG_DB_STORE);
+      const exists = new Set();
+      let checked = 0;
+      const total = keys.length;
+      if (!total) { resolve(exists); return; }
+      keys.forEach(key => {
+        const getReq = store.getKey(key);
+        getReq.onsuccess = () => {
+          if (getReq.result !== undefined) exists.add(key);
+          checked++;
+          if (checked === total) { resolve(exists); db.close(); }
+        };
+        getReq.onerror = () => {
+          checked++;
+          if (checked === total) { resolve(exists); db.close(); }
+        };
+      });
+    };
+    req.onerror = () => resolve(new Set());
+  });
+}
+
+// 从 IDB 读取所有图片，返回 { key, value } 数组（用于备份）
+function idbGetAllImages() {
+  return new Promise((resolve) => {
+    const req = indexedDB.open(IMG_DB_NAME, 1);
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction(IMG_DB_STORE, 'readonly');
+      const store = tx.objectStore(IMG_DB_STORE);
+      const all = [];
+      const cursorReq = store.openCursor();
+      cursorReq.onsuccess = (e) => {
+        const cursor = e.target.result;
+        if (cursor) {
+          all.push({ key: cursor.key, value: cursor.value });
+          cursor.continue();
+        } else {
+          db.close();
+          resolve(all);
+        }
+      };
+      cursorReq.onerror = () => { db.close(); resolve(all); };
+    };
+    req.onerror = () => resolve([]);
+  });
+}
+// 获取 IDB 中所有图片的 key（不读 value，更轻量）
+function idbGetAllKeys() {
+  return new Promise((resolve) => {
+    const req = indexedDB.open(IMG_DB_NAME, 1);
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction(IMG_DB_STORE, 'readonly');
+      const store = tx.objectStore(IMG_DB_STORE);
+      const keys = [];
+      const cursorReq = store.openCursor();
+      cursorReq.onsuccess = (e) => {
+        const cursor = e.target.result;
+        if (cursor) {
+          keys.push(cursor.key);
+          cursor.continue();
+        } else {
+          db.close();
+          resolve(keys);
+        }
+      };
+      cursorReq.onerror = () => { db.close(); resolve([]); };
+    };
+    req.onerror = () => resolve([]);
+  });
+}
+// 清理孤儿图片：遍历 IDB 所有 key，删除不被任何题目引用的
+async function cleanOrphanImages() {
+  const allKeys = await idbGetAllKeys();
+  if (!allKeys.length) return 0;
+  // 收集所有被题目引用的文件名
+  const usedFnames = new Set();
+  for (const q of totalBank) {
+    for (const p of getLocalImagePaths(q)) usedFnames.add(getFname(p));
+  }
+  // 找出孤儿
+  const orphans = allKeys.filter(key => !usedFnames.has(key));
+  if (!orphans.length) return 0;
+  const deleted = await idbBatchDelete(orphans);
+  return deleted;
+}
+
+// 批量删除 IDB 中的图片 key
+function idbBatchDelete(keys) {
+  return new Promise((resolve) => {
+    if (!keys.length) { resolve(0); return; }
+    const req = indexedDB.open(IMG_DB_NAME, 1);
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction(IMG_DB_STORE, 'readwrite');
+      const store = tx.objectStore(IMG_DB_STORE);
+      let deleted = 0;
+      keys.forEach(key => {
+        const delReq = store.delete(key);
+        delReq.onsuccess = () => deleted++;
+        delReq.onerror = () => {};
+      });
+      tx.oncomplete = () => { db.close(); resolve(deleted); };
+      tx.onerror = () => { db.close(); resolve(deleted); };
+    };
+    req.onerror = () => resolve(0);
+  });
+}
+
+// 删除孤儿图片：传入被删题目引用的文件名列表，检查剩余题库是否还在使用，无引用则删除 IDB 缓存
+async function deleteQuestionImages(fnames) {
+  if (!fnames || !fnames.length) return;
+  // 收集剩余题目还在使用的文件名（此时 totalBank 应已重建，不含被删题目）
+  const stillUsed = new Set();
+  for (const q of totalBank) {
+    for (const p of getLocalImagePaths(q)) stillUsed.add(getFname(p));
+  }
+  // 只删无引用的孤儿文件名
+  const orphans = fnames.filter(fn => !stillUsed.has(fn));
+  if (orphans.length) {
+    const deleted = await idbBatchDelete(orphans);
+    if (deleted) console.log(`已清理 ${deleted} 张孤儿图片`);
+  }
+}
+
+// 清空 IDB 中所有图片
+function idbClearAll() {
+  return new Promise((resolve) => {
+    const req = indexedDB.open(IMG_DB_NAME, 1);
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction(IMG_DB_STORE, 'readwrite');
+      const store = tx.objectStore(IMG_DB_STORE);
+      store.clear();
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => { db.close(); resolve(); };
+    };
+    req.onerror = () => resolve();
+  });
+}
+
+// 图片加载失败时回调：尝试从 IDB 读取缓存并替换 src
+async function resolveImgTag(imgEl) {
+  const rawSrc = imgEl.dataset.rawsrc;
+  if (!rawSrc) return;
+  const fname = getFname(rawSrc);
+  if (!fname) return;
+  const cached = await idbGetImage(fname);
+  if (cached) imgEl.src = cached;
+}
+// 通用：获取题目图片的最终 src（先查 IDB，没有则返回原路径）
+async function resolveImageSrc(qOrId) {
+  const id = typeof qOrId === 'string' ? qOrId : qOrId['题目ID'];
+  const q = typeof qOrId === 'string' ? totalBankMap.get(id) : qOrId;
+  if (!q) return '';
+  const raw = (q['图片'] || '').trim();
+  if (!raw) return '';
+  const paths = raw.split('|').map(s=>s.trim()).filter(Boolean);
+  const results = [];
+  for (const p of paths) {
+    if (p.startsWith('data:') || p.startsWith('http') || p.startsWith('blob:')) {
+      results.push(p);
+    } else {
+      const cached = await idbGetImage(getFname(p));
+      results.push(cached || p);
+    }
+  }
+  return results.join('|');
+}
+
+// 导入 Excel 时，让用户选择图片文件夹，读取图片转 base64 存 IDB
+async function resolveLocalImages(newData) {
+  // 收集题库引用的所有本地图片文件名（小写去重）
+  const needFnames = new Set();
+  for (const q of newData) {
+    for (const p of getLocalImagePaths(q)) needFnames.add(getFname(p));
+  }
+  if (!needFnames.size) return;
+
+  // 先检查 IDB 中已有哪些文件名，跳过已缓存的
+  const existsSet = await idbBatchCheck([...needFnames]);
+  const toFetch = new Set([...needFnames].filter(fn => !existsSet.has(fn)));
+  if (!toFetch.size) {
+    showToast('📷', `图片已全部缓存（${existsSet.size} 张），跳过`);
+    return;
+  }
+
+  // 让用户选择图片文件夹
+  const folderInput = document.createElement('input');
+  folderInput.type = 'file';
+  folderInput.webkitdirectory = true;
+  folderInput.style.display = 'none';
+  document.body.appendChild(folderInput);
+  try {
+    await new Promise((resolve) => { folderInput.onchange = resolve; folderInput.click(); });
+  } finally { if (folderInput.parentNode) document.body.removeChild(folderInput); }
+  if (!folderInput.files || !folderInput.files.length) return;
+
+  // 只读取题库需要的文件（按文件名小写匹配，跳过无关文件和已缓存文件）
+  const fileMap = new Map(); // key: 小写文件名 → dataURL
+  const readPromises = [];
+  let skippedFiles = 0;
+  for (const f of folderInput.files) {
+    const fn = f.name.toLowerCase();
+    if (fileMap.has(fn)) continue;           // 同名只读一次
+    if (!toFetch.has(fn)) { skippedFiles++; continue; } // 跳过无关/已缓存文件
+    const promise = new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => { fileMap.set(fn, reader.result); resolve(); };
+      reader.onerror = () => resolve();
+      reader.readAsDataURL(f);
+    });
+    readPromises.push(promise);
+  }
+  await Promise.all(readPromises);
+
+  // 存入 IDB：key = 小写文件名, value = dataURL（按文件名去重，只存一份）
+  const entries = [];
+  for (const [fn, dataUrl] of fileMap) {
+    entries.push([fn, dataUrl]);
+  }
+  if (entries.length) {
+    await idbBatchSet(entries);
+    showToast('📷', `已缓存 ${entries.length} 张新图片（跳过 ${existsSet.size} 张已缓存，忽略 ${skippedFiles} 张无关文件）`);
+  } else {
+    showToast('📷', '图片已全部缓存，跳过');
+  }
+}
+
 // ============================ 合并/保存辅助 ============================
-function rebuildTotalBank() { totalBank = [...cb_cloud, ...cb_personal]; }
+function rebuildTotalBank() {
+  totalBank = [...cb_cloud, ...cb_personal];
+  totalBankMap = new Map(totalBank.map(q => [q['题目ID'], q]));
+}
 function saveBank() {
   saveData(LS.cloud, cb_cloud);
   saveData(LS.personal, cb_personal);
@@ -1349,7 +1641,7 @@ function initLoad() {
   favList = loadData(LS.favs, []).filter(id => id);
   ankiData = loadData(LS.anki, {});
   records = loadData(LS.records, []);
-  settings = loadData(LS.settings, { autoNext: false, wrongStreak: 3, favStreak: 3, freqFirst: true, dailyGoal: 20 });
+  settings = loadData(LS.settings, { autoNext: true, wrongStreak: 3, favStreak: 3, freqFirst: true, dailyGoal: 50 });
   todayRecord = loadData(LS.todayKey(), { total: 0, correct: 0 });
   correctStreak = loadData(LS.prefix + 'correctStreak', {});
   streakData = loadData(LS.streak, { current: 0, max: 0, lastDate: '' });
@@ -2151,7 +2443,7 @@ function toggleExamCard(i) {
   if (header) header.classList.toggle('open');
 }
 
-function exportExamHTML() {
+async function exportExamHTML() {
   if (!_lastExamData) { showToast('', '没有可导出的考试数据'); return; }
   const { questions, timeLimit } = _lastExamData;
   const subject = questions[0]?.['学科'] || '通用';
@@ -2161,6 +2453,19 @@ function exportExamHTML() {
   function esc(str) { return String(str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
   function escJs(str) { return String(str||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,'\\n').replace(/\r/g,''); }
 
+
+  // 预解析图片：查询 IDB，获取 base64
+  const imgCache = new Map();
+  for (const q of questions) {
+    const paths = getLocalImagePaths(q);
+    for (const p of paths) {
+      const fn = getFname(p);
+      if (!imgCache.has(fn)) {
+        const cached = await idbGetImage(fn);
+        if (cached) imgCache.set(fn, cached);
+      }
+    }
+  }
   // 构建题目JSON
   const qData = questions.map(q => ({
     id: q['题目ID'],
@@ -2168,10 +2473,20 @@ function exportExamHTML() {
     type: q['题型'] || '',
     options: q['选项'] ? q['选项'].split(/\n|\\n/).filter(Boolean) : [],
     answer: q['正确答案'] || '',
-    image: q['图片'] || '',
+    image: (function(q, imgCache) {
+    const raw = (q['图片']||'').trim();
+    if (!raw) return '';
+    return raw.split('|').map(p => {
+      p = p.trim();
+      if (p.startsWith('data:') || p.startsWith('http') || p.startsWith('blob:')) return p;
+      const fn = getFname(p);
+      return imgCache.get(fn) || p;
+    }).join('|');
+  })(q, imgCache),
     source: q['来源'] || ''
   }));
 
+  const _SE = "<" + "/script>"; // 避免浏览器提前结束脚本
   const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
@@ -2410,6 +2725,13 @@ async function importExcelOrCSV() {
     }).filter(r => r['题目ID']);
     if (!newData.length) { showToast('❌', '文件中没有有效的题目ID列（需要"题目ID"或"id"）'); return; }
 
+    // 检测是否有本地图片路径（有则提示用户选择图片文件夹，转存到 IndexedDB）
+    const hasLocalImg = newData.some(q => getLocalImagePaths(q).length > 0);
+    if (hasLocalImg) {
+      showToast('📷', '检测到图片路径，请选择图片文件夹（用于离线/网页端显示图片）');
+      await resolveLocalImages(newData);
+    }
+
     // 文件内去重：同ID取最后一条
     const deduped = new Map();
     newData.forEach(r => deduped.set(r['题目ID'], r));
@@ -2461,7 +2783,7 @@ function exportPureBankJSON() {
     const { '刷题次数':_, '正确次数':__, '正确率':___, '最后刷题时间':____, '笔记':_____, '最后修改时间':______, ...rest } = q;
     return rest;
   });
-  const exportData = { version: new Date().toISOString().slice(0,10), exportTime: new Date().toISOString(), count: cb_cloud.length, questions: pure };
+  const exportData = { version: localISO().slice(0,10), exportTime: localISO(), count: cb_cloud.length, questions: pure };
   const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -2472,8 +2794,8 @@ function exportPureBankJSON() {
   showToast('📦', `云端通用题库已导出：${cb_cloud.length}题（不含学习记录）`);
 }
 
-function cleanOldRecords() {
-  if (!confirm('⚠️ 将删除3个月前的答题记录，此操作不可恢复！是否继续？')) return;
+async function cleanOldRecords() {
+  if (!await customConfirm('⚠️ 将删除3个月前的答题记录，此操作不可恢复！是否继续？')) return;
   const cutoff = new Date();
   cutoff.setMonth(cutoff.getMonth() - 3);
   const before = records.length;
@@ -2492,7 +2814,7 @@ function cleanOldRecords() {
   refreshHome();
 }
 
-function dedupByStem() {
+async function dedupByStem() {
   const totalBefore = cb_cloud.length + cb_personal.length;
   const seen = new Map(); // stem -> { bank, index, q }
   const toRemove = [];    // [{ bank, index }]
@@ -2515,7 +2837,7 @@ function dedupByStem() {
     return;
   }
 
-  if (!confirm(`发现 ${toRemove.length} 条重复题干，将保留先遇到的那条并删除其余。\n\n此操作不可撤销，是否继续？`)) return;
+  if (!await customConfirm(`发现 ${toRemove.length} 条重复题干，将保留先遇到的那条并删除其余。\n\n此操作不可撤销，是否继续？`)) return;
 
   // 从后往前删（避免索引偏移），同时清理关联的答题记录
   const removedIDs = new Set();
@@ -2589,36 +2911,50 @@ function exportBankCSV() {
   XLSX.writeFile(wb, '题库_' + ts + '.xlsx');
   showToast('📤', `导出${fb.length}题（已按当前筛选）XLSX`);
 }
-function backupData() {
-  const backup = { version:'3.3', backupTime:new Date().toISOString(), cb_cloud, cb_personal, wrongList, favList, ankiData, records, settings, todayRecord, correctStreak, streakData, dailyLog, unlockedAchievements, examHistory };
+async function backupData() {
+  showToast('💾', '正在备份数据（清理孤儿图片中...）');
+  // 先清理孤儿图片，确保备份只含有效图片
+  const cleaned = await cleanOrphanImages();
+  // 从 IndexedDB 读取所有图片（清理后）
+  const images = await idbGetAllImages();
+  const backup = { version:'4.3', backupTime:localISO(), cb_cloud, cb_personal, wrongList, favList, ankiData, records, settings, todayRecord, correctStreak, streakData, dailyLog, unlockedAchievements, examHistory, _images: images };
   const blob = new Blob([JSON.stringify(backup, null, 2)], { type:'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `心智动力_全量备份_${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.json`;
+  a.download = `心智动力_全量备份_${localISO().slice(0,19).replace(/:/g,'-')}.json`;
   a.click();
   lastBackupDate = new Date().toISOString();
   saveData(LS.lastBackup, lastBackupDate);
   updateBackupStatus();
-  showToast('💾', '全量备份已下载');
+  const msg = cleaned > 0
+    ? `全量备份已下载（清理 ${cleaned} 张孤儿图片，保留 ${images.length} 张）`
+    : `全量备份已下载（包含 ${images.length} 张图片）`;
+  showToast('💾', msg);
 }
 async function copyBackupData() {
-  const backup = { version:'3.3', backupTime:new Date().toISOString(), cb_cloud, cb_personal, wrongList, favList, ankiData, records, settings, todayRecord, correctStreak, streakData, dailyLog, unlockedAchievements, examHistory };
+  showToast('📋', '正在准备备份数据（清理孤儿图片中...）');
+  const cleaned = await cleanOrphanImages();
+  const images = await idbGetAllImages();
+  const backup = { version:'4.3', backupTime:localISO(), cb_cloud, cb_personal, wrongList, favList, ankiData, records, settings, todayRecord, correctStreak, streakData, dailyLog, unlockedAchievements, examHistory, _images: images };
   try {
     await navigator.clipboard.writeText(JSON.stringify(backup, null, 2));
     lastBackupDate = new Date().toISOString();
     saveData(LS.lastBackup, lastBackupDate);
     updateBackupStatus();
-    showToast('📋', '备份数据已复制到剪贴板');
+    const msg = cleaned > 0
+      ? `备份数据已复制到剪贴板（清理 ${cleaned} 张孤儿图片，保留 ${images.length} 张）`
+      : `备份数据已复制到剪贴板（包含 ${images.length} 张图片）`;
+    showToast('📋', msg);
   } catch(e) {
     showToast('❌', '复制失败，请用「全量备份」下载文件');
   }
 }
-function restoreData() {
+async function restoreData() {
   const input = document.createElement('input'); input.type = 'file'; input.accept = '.json';
-  input.onchange = e => {
+  input.onchange = async e => {
     const file = e.target.files[0]; if(!file) return;
     const reader = new FileReader();
-    reader.onload = ev => {
+    reader.onload = async ev => {
       let data;
       try { data = JSON.parse(ev.target.result); }
       catch(e) { console.error('JSON解析失败', e); showToast('❌', '备份文件损坏，无法解析'); return; }
@@ -2673,6 +3009,13 @@ function restoreData() {
       examHistory = data.examHistory || [];
       rebuildTotalBank();
 
+      // 恢复图片（从备份文件的 _images 字段）
+      if (data._images && data._images.length) {
+        const entries = data._images.map(img => [img.key, img.value]);
+        await idbBatchSet(entries);
+        showToast('📷', `已恢复 ${entries.length} 张图片`);
+      }
+
       // 恢复后刷新备份时间
       lastBackupDate = new Date().toISOString();
       saveData(LS.lastBackup, lastBackupDate);
@@ -2685,7 +3028,7 @@ function restoreData() {
   };
   input.click();
 }
-function confirmClear() { if(confirm('清空所有数据？不可恢复')){ localStorage.clear(); location.reload(); } }
+async function confirmClear() { if(await customConfirm('⚠️ 清空所有数据？不可恢复！\n\n将清除题库、记录、图片等所有本地数据。')){ localStorage.clear(); await idbClearAll(); location.reload(); } }
 function openSettings() { applySettings(); openModal('settingsModal'); }
 function openGuide() {
   window.open('https://zcnjf0lwkgt6.feishu.cn/wiki/N8lDwm95miHNH5k7qkvcwieXnDb?from=from_copylink', '_blank');
@@ -2865,11 +3208,16 @@ function updateReasonTags() {
   container.innerHTML = html;
 }
 function filterByReasonTag(val) { filterReason = val || null; refreshHome(); }
-function deleteFilteredQuestions() {
+async function deleteFilteredQuestions() {
   const filtered = applyFilters(totalBank);
   if (filtered.length === 0) { showToast('', '没有匹配的题目可删除'); return; }
-  if (!confirm(`⚠️ 确定删除筛选出的 ${filtered.length} 题？此操作不可恢复！\n\n建议先导出备份。`)) return;
+  if (!await customConfirm(`⚠️ 确定删除筛选出的 ${filtered.length} 题？此操作不可恢复！\n\n建议先导出备份。`)) return;
   const idsToDelete = new Set(filtered.map(q => q['题目ID']));
+  // 先收集被删题目的图片文件名（必须在 rebuild 之前）
+  const delFnames = new Set();
+  for (const q of filtered) {
+    for (const p of getLocalImagePaths(q)) delFnames.add(getFname(p));
+  }
   // 从cb_cloud/cb_personal移除（而非直接操作totalBank）
   const delCloud = cb_cloud.filter(q => !idsToDelete.has(q['题目ID']));
   const delPersonal = cb_personal.filter(q => !idsToDelete.has(q['题目ID']));
@@ -2886,6 +3234,8 @@ function deleteFilteredQuestions() {
   saveData(LS.favs, favList);
   saveData(LS.anki, ankiData);
   saveData(LS.records, records);
+  // 清理孤儿图片
+  await deleteQuestionImages([...delFnames]);
   showToast('🗑️', `已删除 ${filtered.length} 题`);
   resetAllFilters();
 }
@@ -3208,8 +3558,24 @@ function renderQuestion() {
   const imgWrap = document.getElementById('qImageWrap');
   if(q['图片']) {
     const imgs = String(q['图片']).split('|').map(s=>s.trim()).filter(Boolean);
-    imgWrap.innerHTML = imgs.map(src=>`<img class="q-image" src="${escapeHtml(src)}" onclick="openLightbox(this.src)" title="点击放大" style="margin:4px 0;">`).join('');
+    imgWrap.innerHTML = imgs.map(rawSrc => {
+      // 非本地路径直接用；本地路径先写 rawSrc，异步查 IDB 后替换
+      const needsResolve = !rawSrc.startsWith('data:') && !rawSrc.startsWith('http') && !rawSrc.startsWith('blob:');
+      const imgFname = needsResolve ? getFname(rawSrc) : '';
+      return `<img class="q-image" src="${escapeHtml(rawSrc)}" data-imgid="${imgFname}" data-rawsrc="${escapeHtml(rawSrc)}" onclick="openLightbox(this.src)" title="点击放大" style="margin:4px 0;" onerror="if(this.dataset.imgid) resolveImgTag(this);">`;
+    }).join('');
     imgWrap.style.display = 'block';
+    // 异步解析所有本地图片路径，解析后直接替换 img src
+    (async () => {
+      const imgEls = imgWrap.querySelectorAll('img[data-imgid]');
+      for (const el of imgEls) {
+        const rawSrc = el.dataset.rawsrc;
+        if (!rawSrc) continue;
+        if (rawSrc.startsWith('data:') || rawSrc.startsWith('http') || rawSrc.startsWith('blob:')) continue;
+        const cached = await idbGetImage(getFname(rawSrc));
+        if (cached) el.src = cached;
+      }
+    })();
   } else { imgWrap.innerHTML = ''; imgWrap.style.display = 'none'; }
   
   const noteArea = document.getElementById('noteArea');
@@ -3497,7 +3863,7 @@ function updateAnki(id, quality) {
   }
   card.easiness = Math.max(1.3, card.easiness + (0.1 - (5-quality)*0.08));
   const next = new Date(); next.setDate(next.getDate() + card.interval);
-  card.nextDate = next.toISOString().slice(0,10);
+  card.nextDate = localISO(next).slice(0,10);
   ankiData[id]=card;
   saveData(LS.anki, ankiData);
 }
@@ -3661,7 +4027,30 @@ function saveEditedQuestion() {
   loadQuestion();
   showToast('✅', '题目已更新');
 }
-function deleteCurrentQuestion() { if(currentQ && confirm('确定删除此题？')){ const id=currentQ['题目ID']; cb_cloud=cb_cloud.filter(x=>x['题目ID']!==id); cb_personal=cb_personal.filter(x=>x['题目ID']!==id); saveBank(); nextQuestion(); refreshHome(); } }
+async function deleteCurrentQuestion() {
+  if (!currentQ || !await customConfirm('确定删除此题？')) return;
+  const id = currentQ['题目ID'];
+  // 先收集被删题目的图片文件名（必须在 rebuild 之前，否则 totalBankMap 找不到）
+  const delFnames = getLocalImagePaths(currentQ).map(getFname);
+  // 从题库移除
+  cb_cloud = cb_cloud.filter(x => x['题目ID'] !== id);
+  cb_personal = cb_personal.filter(x => x['题目ID'] !== id);
+  rebuildTotalBank();
+  saveBank();
+  // 同步清理关联数据（错题本、收藏夹、anki、记录）
+  wrongList = wrongList.filter(x => x !== id);
+  favList = favList.filter(x => x !== id);
+  delete ankiData[id];
+  records = records.filter(r => r.id !== id);
+  saveData(LS.wrong, wrongList);
+  saveData(LS.favs, favList);
+  saveData(LS.anki, ankiData);
+  saveData(LS.records, records);
+  // 清理孤儿图片（此时 totalBank 已重建，不含被删题目，stillUsed 检查正确）
+  await deleteQuestionImages(delFnames);
+  nextQuestion();
+  refreshHome();
+}
 
 // ========== 导出PDF（打印方案） ==========
 function openExportPDF() {
@@ -3920,6 +4309,27 @@ function fillCheckAnswer(isUserCorrect) {
 
 function openModal(id) { document.getElementById(id).classList.add('show'); }
 function closeModal(id) { document.getElementById(id).classList.remove('show'); }
+// 自定义确认弹窗（替代原生 confirm，支持 await）
+function customConfirm(msg, title) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById('customConfirmModal');
+    document.getElementById('customConfirmTitle').textContent = title || '确认操作';
+    document.getElementById('customConfirmMsg').textContent = msg;
+    modal.classList.add('show');
+    const okBtn = document.getElementById('customConfirmOk');
+    const cancelBtn = document.getElementById('customConfirmCancel');
+    function cleanup(result) {
+      modal.classList.remove('show');
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      resolve(result);
+    }
+    function onOk() { cleanup(true); }
+    function onCancel() { cleanup(false); }
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+  });
+}
 function applySettings() { document.getElementById('setAutoNext').checked = settings.autoNext; document.getElementById('setWrongStreak').value = settings.wrongStreak; document.getElementById('setFavStreak').value = settings.favStreak; document.getElementById('setDailyGoal').value = settings.dailyGoal || 20; }
 function saveSettings() { settings.autoNext = document.getElementById('setAutoNext').checked; settings.wrongStreak = parseInt(document.getElementById('setWrongStreak').value)||3; settings.favStreak = parseInt(document.getElementById('setFavStreak').value)||3; settings.dailyGoal = Math.max(5, Math.min(200, parseInt(document.getElementById('setDailyGoal').value)||20)); saveData(LS.settings, settings); }
 
@@ -4341,6 +4751,18 @@ document.addEventListener('keydown', function(e) {
   <div class="app-header"><div><h1>考试成绩</h1><div class="subtitle" id="examResultSubtitle"></div></div><button class="help-btn" onclick="goHome()">返回主页</button></div>
   <div class="dashboard-container" id="examResultContent"></div>
   <div class="app-footer" style="margin-top:32px;"><div class="footer-inner"><span>心智动力 Elitebrain · 让学习更高效</span><span>v4.0 · 基础功能永久免费 · 数据本地存储</span><a href="#" onclick="event.preventDefault();showInfoPage('privacy');" style="color:var(--primary);text-decoration:underline;font-size:11px;">隐私说明</a></div></div>
+</div>
+
+<!-- 自定义确认弹窗 -->
+<div class="modal-overlay" id="customConfirmModal">
+  <div class="modal-box" style="max-width:400px;">
+    <div class="modal-title" id="customConfirmTitle">确认操作</div>
+    <p id="customConfirmMsg" style="color:var(--text-secondary);margin-bottom:24px;line-height:1.6;white-space:pre-line;"></p>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" id="customConfirmCancel">取消</button>
+      <button class="btn btn-primary" id="customConfirmOk" style="background:var(--error);border-color:var(--error);">确认</button>
+    </div>
+  </div>
 </div>
 
 </body>
