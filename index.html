@@ -174,6 +174,20 @@ body {
 }
 .tag.active { background: var(--gold); color: #fff; border-color: var(--gold); }
 .tag-subject.active { background: var(--blue); border-color: var(--blue); }
+.subject-category { margin-bottom: 4px; }
+.subject-cat-label { font-size: 11px; color: var(--text-hint); margin-right: 6px; font-weight: 500; }
+.subject-tags-row { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.subject-tags-row .tag-subject { font-size: 12px; padding: 3px 10px; }
+.subject-more-btn {
+  font-size: 11px; color: var(--blue); cursor: pointer;
+  border: 1px dashed var(--blue); border-radius: 12px;
+  padding: 3px 8px; background: transparent; transition: all 0.15s;
+}
+.subject-more-btn:hover { background: rgba(59,130,246,0.08); }
+.subject-hidden { display: none; }
+.subject-expanded .subject-hidden { display: inline-flex; }
+.subject-expanded .subject-more-btn::after { content: '▲'; }
+.subject-more-btn::after { content: '▼'; }
 
 .quiz-container {
   max-width: 800px; margin: 0 auto; padding: 16px;
@@ -903,9 +917,7 @@ body {
       <div class="section-title">🎯 选择练题范围</div>
       <div class="filter-row">
         <span class="filter-label">学科</span>
-        <select id="subjectSelect" class="filter-select" onchange="filterBySubjectSelect(this.value)">
-          <option value="">全部学科</option>
-        </select>
+        <div id="subjectTagsContainer"></div>
       </div>
       <div class="filter-row">
         <span class="filter-label">教材</span>
@@ -1230,7 +1242,7 @@ body {
 
 <script>
 // ============================ 版本号 ============================
-var APP_VERSION = '5.1'; // 每次发版必须同步更新 version.json
+var APP_VERSION = '5.3'; // 每次发版必须同步更新 version.json
 
 // ============================ 存储 keys ============================
 const LS = {
@@ -3106,13 +3118,70 @@ function matchesOtherFilters(q, excludeField) {
 }
 function updateSubjectTags() {
   const subjects = getSubjectList();
-  const container = document.getElementById('subjectSelect');
+  const container = document.getElementById('subjectTagsContainer');
   if(!container) return;
-  let html = '<option value="">全部学科</option>';
-  for(const s of subjects) {
-    html += `<option value="${escapeHtml(s)}"${filterSubject===s?' selected':''}>${escapeHtml(s)}</option>`;
+  if(!subjects.length) { container.innerHTML = ''; return; }
+
+  // 学科分类规则：按学科名归类
+  const K12 = ['语文','数学','英语','物理','化学','生物','历史','地理','政治','道德与法治','科学','信息技术','体育','音乐','美术'];
+  const VOCATIONAL = ['营养师','AI训练师','心理咨询师','健康管理师','人力资源管理师','会计','护士','教师资格','消防工程师','建造师','法律职业','社会工作师','计算机','电工','育婴师','养老护理员','中式烹调师','西式面点师','茶艺师','理财规划师'];
+  const k12Set = new Set(K12.map(s=>s.toLowerCase()));
+  const vocSet = new Set(VOCATIONAL.map(s=>s.toLowerCase()));
+
+  const groups = {}; // category → [subjects]
+  const others = [];
+  for (const s of subjects) {
+    const sl = s.toLowerCase();
+    if (k12Set.has(sl)) {
+      if (!groups['K12']) groups['K12'] = [];
+      groups['K12'].push(s);
+    } else if (vocSet.has(sl) || sl.includes('师') || sl.includes('资格') || sl.includes('工程师') || sl.includes('管理')) {
+      if (!groups['职业技能']) groups['职业技能'] = [];
+      groups['职业技能'].push(s);
+    } else {
+      others.push(s);
+    }
   }
+  if (others.length) groups['其他'] = others;
+
+  // 每个 class 内按学科数量排序（多的在前）
+  for (const cat of Object.keys(groups)) {
+    // 不排序，保持原 subjects 顺序即可
+  }
+
+  const SHOW_LIMIT = 6; // 每个分类默认显示几个
+  let html = '';
+
+  // "全部"标签
+  html += `<span class="tag tag-subject${!filterSubject?' active':''}" onclick="filterBySubjectTag(null, this)">全部</span> `;
+
+  for (const [cat, items] of Object.entries(groups)) {
+    const needCollapse = items.length > SHOW_LIMIT;
+    const catId = 'subjCat_' + cat.replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g,'');
+    html += `<span class="subject-category">`;
+    if (Object.keys(groups).length > 1) {
+      html += `<span class="subject-cat-label">${cat}：</span>`;
+    }
+    html += `<span class="subject-tags-row" id="${catId}">`;
+    items.forEach((s, i) => {
+      const hidden = (needCollapse && i >= SHOW_LIMIT) ? ' subject-hidden' : '';
+      html += `<span class="tag tag-subject${filterSubject===s?' active':''}${hidden}" onclick="filterBySubjectTag('${escapeHtml(s)}', this)">${escapeHtml(s)}</span>`;
+    });
+    if (needCollapse) {
+      html += `<span class="subject-more-btn" onclick="toggleSubjectCategory('${catId}', this)"></span>`;
+    }
+    html += `</span></span> `;
+  }
+
   container.innerHTML = html;
+}
+function filterBySubjectTag(val, el) {
+  filterSubject = val || null;
+  refreshHome();
+}
+function toggleSubjectCategory(catId, btn) {
+  const row = document.getElementById(catId);
+  if (row) row.classList.toggle('subject-expanded');
 }
 function updateSourceTags() {
   const container = document.getElementById('sourceTags');
@@ -3273,7 +3342,14 @@ function updateFreqTags() {
   }
   container.innerHTML = html;
 }
-function filterBySubjectSelect(val) { filterSubject = val||null; refreshHome(); }
+function filterBySubjectTag(val, el) {
+  filterSubject = val || null;
+  refreshHome();
+}
+function toggleSubjectCategory(catId, btn) {
+  const row = document.getElementById(catId);
+  if (row) row.classList.toggle('subject-expanded');
+}
 function filterByTextbookSelect(val) { filterTextbook = val||null; refreshHome(); }
 function filterBySourceTag(val, el) { filterSource = val||null; refreshHome(); }
 function filterByChapterSelect(val) { filterChapter = val||null; refreshHome(); }
@@ -3282,9 +3358,8 @@ function filterByTypeTag(type, el) { filterType = type||null; refreshHome(); }
 function filterByDiffTag(diff, el) { filterDiff = diff||null; refreshHome(); }
 function filterByFreqTag(freq, el) { filterFreq = freq||null; refreshHome(); }
 function resetAllFilters() {
+  // 学科标签重置（重新渲染即可去掉 active 状态）
   filterSubject = filterTextbook = filterChapter = filterGroup = filterMethod = filterSource = filterType = filterDiff = filterFreq = filterWrongCount = filterReason = null;
-  const subjectSelect = document.getElementById('subjectSelect');
-  if (subjectSelect) subjectSelect.value = '';
   refreshHome();
 }
 function getBackupDays() {
@@ -4119,14 +4194,12 @@ function openPrintPreview(questions, mode, title, colorMode) {
   var baseUrl = location.href.substring(0, location.href.lastIndexOf('/')+1);
   var h = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>' + escapeHtml(displayTitle) + '</title>';
   h += '<style>';
-  h += '@page{size:A4;margin:10mm;}*{margin:0;padding:0;box-sizing:border-box;}';
+  h += '@page{size:A4;margin:10mm;@bottom-center{content:counter(page);font-size:10px;}}*{margin:0;padding:0;box-sizing:border-box;}';
   h += 'body{font-family:"Microsoft YaHei","SimSun",sans-serif;color:#222;font-size:11px;line-height:1.35;}';
   h += '.header{text-align:center;padding-bottom:8px;border-bottom:1.5px solid #333;margin-bottom:8px;}';
   h += '.header h1{font-size:16px;margin-bottom:3px;}';
   h += '.header .sub{font-size:10px;color:#666;}';
-  h += '.col-l{float:left;width:49%;padding-right:8px;}';
-  h += '.col-r{float:right;width:49%;padding-left:8px;}';
-  h += '.clearfix{clear:both;}';
+  h += '.questions-wrap{column-count:2;column-gap:16px;column-rule:1px dotted #ddd;}';
   h += '.q-item{margin-bottom:3px;padding-bottom:3px;border-bottom:1px dotted #ddd;break-inside:avoid-page;}';
   h += '.q-num{font-weight:700;}';
   h += '.q-type{font-size:10px;color:#6D28D9;margin-right:2px;}';
@@ -4149,32 +4222,10 @@ function openPrintPreview(questions, mode, title, colorMode) {
   h += '</style></head><body>';
   h += '<div class="header"><h1>' + escapeHtml(displayTitle) + '</h1>';
   h += '<div class="sub">' + escapeHtml(filterDesc.length ? filterDesc.join(' · ') : '') + ' · 共' + questions.length + '题 · ' + ts + '</div></div>';
-  // 智能分栏：按预估行数平衡左右列
-  var estLines = function(q) {
-    var n = 1;
-    var stem = String(q['题干']||'').length;
-    if(stem > 40) n += Math.floor(stem / 40);
-    var type = q['题型']||'';
-    if(type === '单选题' || type === '多选题') {
-      ['A','B','C','D','E'].forEach(function(o){ if(q['选项'+o]) n++; });
-    }
-    if(String(q['图片']||'').trim()) n += 2;
-    if(type === '填空题') n += 1;
-    if(type === '简答题') n += 2;
-    return n;
-  };
-  var totalEst = 0, estArr = [];
-  for(var ei=0;ei<questions.length;ei++) { var e = estLines(questions[ei]); estArr.push(e); totalEst += e; }
-  var half = totalEst / 2, run = 0, splitAt = 0;
-  for(var si=0;si<estArr.length;si++) { if(run + estArr[si] / 2 >= half) { splitAt = si; break; } run += estArr[si]; }
-  if(splitAt < 1) splitAt = 1;
-  if(splitAt >= questions.length) splitAt = questions.length - 1;
-  // 双栏独立浮动：各列独立分页，互不干扰
-  h += '<div class="col-l">';
-  for(var li=0;li<splitAt;li++) h += renderPrintQ(questions[li], li+1, mode, baseUrl);
-  h += '</div><div class="col-r">';
-  for(var ri=splitAt;ri<questions.length;ri++) h += renderPrintQ(questions[ri], ri+1, mode, baseUrl);
-  h += '</div><div class="clearfix"></div>';
+  // 多列布局：题目自然从左列流到右列，一页排满再换页
+  h += '<div class="questions-wrap">';
+  for(var qi=0;qi<questions.length;qi++) h += renderPrintQ(questions[qi], qi+1, mode, baseUrl);
+  h += '</div>';
   if(mode === 'exam') {
     h += '<div class="answer-section"><h2>参考答案</h2><div>';
     for(var ai=0;ai<questions.length;ai++) {
