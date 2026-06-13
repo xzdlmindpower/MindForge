@@ -1246,7 +1246,7 @@ body {
 
 <script>
 // ============================ 版本号 ============================
-var APP_VERSION = '6.2'; // 每次发版必须同步更新 version.json
+var APP_VERSION = '6.3'; // 每次发版必须同步更新 version.json
 
 // ============================ 存储 keys ============================
 const LS = {
@@ -1417,6 +1417,24 @@ function idbBatchCheck(keys) {
           checked++;
           if (checked === total) resolve(exists);
         };
+      });
+    });
+  });
+}
+
+// 批量从IDB读取指定key的图片dataUrl，返回 Map<key, dataUrl>
+function idbBatchGetImage(keys) {
+  return openImgDB().then(db => {
+    const tx = db.transaction(IMG_DB_STORE, 'readonly');
+    const store = tx.objectStore(IMG_DB_STORE);
+    const map = new Map();
+    let pending = keys.length;
+    if (!pending) return Promise.resolve(map);
+    return new Promise(resolve => {
+      keys.forEach(key => {
+        const req = store.get(key);
+        req.onsuccess = () => { if (req.result !== undefined) map.set(key, req.result); if (--pending === 0) resolve(map); };
+        req.onerror = () => { if (--pending === 0) resolve(map); };
       });
     });
   });
@@ -4423,7 +4441,7 @@ function parsePDFRange(input, total) {
   });
   return Array.from(indices).sort(function(a,b){return a-b;});
 }
-function doExportPDF() {
+async function doExportPDF() {
   var mode = document.querySelector('input[name=pdfMode]:checked').value;
   var colorMode = document.querySelector('input[name=pdfColor]:checked').value;
   var title = document.getElementById('pdfTitle').value.trim();
@@ -4432,9 +4450,18 @@ function doExportPDF() {
   if(indices.length === 0) { showToast('⚠️','没有选中有效题目'); return; }
   var questions = indices.map(function(i){return window._pdfBank[i];});
   closeModal('exportPDFModal');
-  openPrintPreview(questions, mode, title, colorMode);
+  // 收集PDF所需图片key，从IDB批量读取
+  const imgKeys = new Set();
+  questions.forEach(function(q) {
+    getLocalImagePaths(q).forEach(function(p) { imgKeys.add(getFname(p)); });
+  });
+  var imgMap = new Map();
+  if (imgKeys.size > 0) {
+    try { imgMap = await idbBatchGetImage([...imgKeys]); } catch(e) { console.warn('[PDF] IDB图片读取失败', e); }
+  }
+  openPrintPreview(questions, mode, title, colorMode, imgMap);
 }
-function openPrintPreview(questions, mode, title, colorMode) {
+function openPrintPreview(questions, mode, title, colorMode, imgMap) {
   var ts = new Date().toLocaleDateString('zh-CN');
   var filterDesc = [];
   if(filterSubject) filterDesc.push(filterSubject);
@@ -4466,14 +4493,14 @@ function openPrintPreview(questions, mode, title, colorMode) {
   h += '.q-item{margin-bottom:3px;padding-bottom:3px;border-bottom:1px dotted #ddd;break-inside:avoid-page;}';
   h += '.q-num{font-weight:700;}';
   h += '.q-type{font-size:10px;color:#6D28D9;margin-right:2px;}';
-  h += '.q-img{max-width:100%;max-height:90px;margin:2px 0;border-radius:2px;object-fit:contain;}';
+  h += '.q-img{max-width:100%;max-height:200px;margin:2px 0;border-radius:2px;object-fit:contain;}';
   h += '.q-opt{margin-left:10px;font-size:10px;line-height:1.3;}';
   h += '.q-blank{margin-left:10px;font-size:10px;color:#999;}';
   h += '.q-essay-area{margin-left:10px;color:#ccc;border-bottom:1px dashed #ddd;padding-bottom:14px;font-size:10px;}';
   h += '.q-answer{margin-top:2px;padding:2px 6px;background:#F5F3FF;border-radius:2px;font-size:10px;}';
   h += '.q-answer b{color:#7C3AED;}';
   h += '.q-answer .analysis{color:#555;}';
-  h += '.answer-section{page-break-before:always;padding-top:10px;border-top:1.5px solid #333;margin-top:10px;}';
+  h += '.answer-section{page-break-before:always;padding-top:10px;border-top:1.5px solid #333;margin-top:10px;column-count:2;column-gap:16px;column-rule:1px dotted #ddd;}';
   h += '.answer-section h2{font-size:14px;margin-bottom:6px;}';
   h += '.answer-section .ans-item{margin-bottom:2px;font-size:10px;break-inside:avoid;}';
   h += '.answer-section .ans-analysis{color:#666;}';
@@ -4487,7 +4514,8 @@ function openPrintPreview(questions, mode, title, colorMode) {
   h += '<div class="sub">' + escapeHtml(filterDesc.length ? filterDesc.join(' · ') : '') + ' · 共' + questions.length + '题 · ' + ts + '</div></div>';
   // 多列布局：题目自然从左列流到右列，一页排满再换页
   h += '<div class="questions-wrap">';
-  for(var qi=0;qi<questions.length;qi++) h += renderPrintQ(questions[qi], qi+1, mode, baseUrl);
+  var printedImgs = {}; // fname → 首次题号，用于同图去重
+  for(var qi=0;qi<questions.length;qi++) h += renderPrintQ(questions[qi], qi+1, mode, baseUrl, imgMap, printedImgs);
   h += '</div>';
   if(mode === 'exam') {
     h += '<div class="answer-section"><h2>参考答案</h2><div>';
@@ -4515,7 +4543,7 @@ function openPrintPreview(questions, mode, title, colorMode) {
   w.document.write(h);
   w.document.close();
 }
-function renderPrintQ(q, num, mode, baseUrl) {
+function renderPrintQ(q, num, mode, baseUrl, imgMap, printedImgs) {
   var type = q['题型']||'';
   var qid = q['题目ID']||num;
   var h = '<div class="q-item">';
@@ -4524,9 +4552,22 @@ function renderPrintQ(q, num, mode, baseUrl) {
   h += escapeHtml(q['题干']||'') + '</div>';
   var imgs = String(q['图片']||'').split('|').map(function(s){return s.trim();}).filter(Boolean);
   imgs.forEach(function(src) {
-    var fullSrc = src;
-    if(src.indexOf('http')!==0 && src.indexOf('data:')!==0 && src.indexOf('blob:')!==0) fullSrc = baseUrl + src;
-    h += '<div><img class="q-img" src="' + escapeHtml(fullSrc) + '" onerror="this.style.display=\'none\'"></div>';
+    var imgSrc;
+    var fname;
+    if(src.indexOf('http')===0 || src.indexOf('data:')===0 || src.indexOf('blob:')===0) {
+      imgSrc = src;
+      fname = src;
+    } else {
+      fname = getFname(src);
+      imgSrc = imgMap.get(fname) || (baseUrl + src);
+    }
+    // 同图去重：首次打印，后续显示引用标注
+    if(printedImgs[fname]) {
+      h += '<div style="font-size:9px;color:#999;margin:2px 0;">📷 见第 ' + printedImgs[fname] + ' 题</div>';
+    } else {
+      printedImgs[fname] = num;
+      h += '<div><img class="q-img" src="' + imgSrc + '" onerror="this.style.display=\'none\'"></div>';
+    }
   });
   if(type==='单选题'||type==='多选题') {
     ['A','B','C','D','E'].forEach(function(o) {
