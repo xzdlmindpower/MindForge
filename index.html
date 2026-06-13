@@ -1246,7 +1246,7 @@ body {
 
 <script>
 // ============================ 版本号 ============================
-var APP_VERSION = '5.6'; // 每次发版必须同步更新 version.json
+var APP_VERSION = '6.0'; // 每次发版必须同步更新 version.json
 
 // ============================ 存储 keys ============================
 const LS = {
@@ -1327,17 +1327,38 @@ let answerStatus = {};
 // ============================ IndexedDB 图片缓存 ============================
 const IMG_DB_NAME = 'cbImgDB';
 const IMG_DB_STORE = 'images';
-let _idbReady = null;
+const IMG_DB_VER = 7; // 统一版本号（与浏览器已有IDB版本一致，onupgradeneeded有安全判断）
+
+// 每次打开新连接（不缓存），确保版本升级后不会复用旧连接
 function openImgDB() {
-  if (_idbReady) return _idbReady;
-  _idbReady = new Promise((resolve, reject) => {
-    const req = indexedDB.open(IMG_DB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(IMG_DB_STORE);
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IMG_DB_NAME, IMG_DB_VER);
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(IMG_DB_STORE)) {
+        db.createObjectStore(IMG_DB_STORE);
+      }
+    };
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onerror = () => {
+      // 版本冲突（VersionError）时，不指定版本号重新打开（使用当前最高版本）
+      if (req.error && req.error.name === 'VersionError') {
+        const fallback = indexedDB.open(IMG_DB_NAME);
+        fallback.onupgradeneeded = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains(IMG_DB_STORE)) {
+            db.createObjectStore(IMG_DB_STORE);
+          }
+        };
+        fallback.onsuccess = () => resolve(fallback.result);
+        fallback.onerror = () => reject(fallback.error);
+      } else {
+        reject(req.error);
+      }
+    };
   });
-  return _idbReady;
 }
+
 function idbGetImage(key) {
   return openImgDB().then(db => new Promise((resolve) => {
     const tx = db.transaction(IMG_DB_STORE, 'readonly');
@@ -1377,151 +1398,120 @@ function localISO(d) {
 }
 // 批量检查 IDB 中是否已存在这些 key，返回已存在的 key 集合
 function idbBatchCheck(keys) {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(IMG_DB_NAME, 1);
-    req.onsuccess = () => {
-      const db = req.result;
-      const tx = db.transaction(IMG_DB_STORE, 'readonly');
-      const store = tx.objectStore(IMG_DB_STORE);
-      const exists = new Set();
-      let checked = 0;
-      const total = keys.length;
-      if (!total) { resolve(exists); return; }
+  return openImgDB().then(db => {
+    const tx = db.transaction(IMG_DB_STORE, 'readonly');
+    const store = tx.objectStore(IMG_DB_STORE);
+    const exists = new Set();
+    let checked = 0;
+    const total = keys.length;
+    if (!total) return Promise.resolve(exists);
+    return new Promise((resolve) => {
       keys.forEach(key => {
         const getReq = store.getKey(key);
         getReq.onsuccess = () => {
           if (getReq.result !== undefined) exists.add(key);
           checked++;
-          if (checked === total) { resolve(exists); db.close(); }
+          if (checked === total) resolve(exists);
         };
         getReq.onerror = () => {
           checked++;
-          if (checked === total) { resolve(exists); db.close(); }
+          if (checked === total) resolve(exists);
         };
       });
-    };
-    req.onerror = () => resolve(new Set());
+    });
   });
 }
 
 // 从 IDB 读取所有图片，返回 { key, value } 数组（用于备份）
 function idbGetAllImages() {
-  return new Promise((resolve) => {
-    const req = indexedDB.open(IMG_DB_NAME, 1);
-    req.onsuccess = () => {
-      const db = req.result;
-      const tx = db.transaction(IMG_DB_STORE, 'readonly');
-      const store = tx.objectStore(IMG_DB_STORE);
-      const all = [];
-      const cursorReq = store.openCursor();
-      cursorReq.onsuccess = (e) => {
-        const cursor = e.target.result;
-        if (cursor) {
-          all.push({ key: cursor.key, value: cursor.value });
-          cursor.continue();
-        } else {
-          db.close();
-          resolve(all);
-        }
-      };
-      cursorReq.onerror = () => { db.close(); resolve(all); };
+  return openImgDB().then(db => new Promise((resolve) => {
+    const tx = db.transaction(IMG_DB_STORE, 'readonly');
+    const store = tx.objectStore(IMG_DB_STORE);
+    const all = [];
+    const cursorReq = store.openCursor();
+    cursorReq.onsuccess = (e) => {
+      const cursor = e.target.result;
+      if (cursor) {
+        all.push({ key: cursor.key, value: cursor.value });
+        cursor.continue();
+      } else {
+        resolve(all);
+      }
     };
-    req.onerror = () => resolve([]);
-  });
+    cursorReq.onerror = () => resolve(all);
+  }));
 }
 // 获取 IDB 中所有图片的 key（不读 value，更轻量）
 function idbGetAllKeys() {
-  return new Promise((resolve) => {
-    const req = indexedDB.open(IMG_DB_NAME, 1);
-    req.onsuccess = () => {
-      const db = req.result;
-      const tx = db.transaction(IMG_DB_STORE, 'readonly');
-      const store = tx.objectStore(IMG_DB_STORE);
-      const keys = [];
-      const cursorReq = store.openCursor();
-      cursorReq.onsuccess = (e) => {
-        const cursor = e.target.result;
-        if (cursor) {
-          keys.push(cursor.key);
-          cursor.continue();
-        } else {
-          db.close();
-          resolve(keys);
-        }
-      };
-      cursorReq.onerror = () => { db.close(); resolve([]); };
+  return openImgDB().then(db => new Promise((resolve) => {
+    const tx = db.transaction(IMG_DB_STORE, 'readonly');
+    const store = tx.objectStore(IMG_DB_STORE);
+    const keys = [];
+    const cursorReq = store.openCursor();
+    cursorReq.onsuccess = (e) => {
+      const cursor = e.target.result;
+      if (cursor) {
+        keys.push(cursor.key);
+        cursor.continue();
+      } else {
+        resolve(keys);
+      }
     };
-    req.onerror = () => resolve([]);
-  });
+    cursorReq.onerror = () => resolve([]);
+  }));
 }
 // 清理孤儿图片：遍历 IDB 所有 key，删除不被任何题目引用的
 async function cleanOrphanImages() {
   const allKeys = await idbGetAllKeys();
   if (!allKeys.length) return 0;
-  // 收集所有被题目引用的文件名
-  const usedFnames = new Set();
+  // 有效key = 所有题目ID（导入时只按题目ID存图，见importImagesStandalone）
+  const validKeys = new Set();
   for (const q of totalBank) {
-    for (const p of getLocalImagePaths(q)) usedFnames.add(getFname(p));
+    const qid = String(q['题目ID'] || '').trim();
+    if (qid) validKeys.add(qid);
   }
-  // 找出孤儿
-  const orphans = allKeys.filter(key => !usedFnames.has(key));
+  // 找出孤儿（大小写不敏感兜底）
+  const orphans = allKeys.filter(key =>
+    !validKeys.has(key) && !validKeys.has(key.toLowerCase())
+  );
   if (!orphans.length) return 0;
   const deleted = await idbBatchDelete(orphans);
+  console.log('[孤儿清理] 删除 ' + deleted + ' 个冗余key: ' + orphans.slice(0, 5).join(', ') + (orphans.length > 5 ? '...' : ''));
   return deleted;
 }
 
 // 批量删除 IDB 中的图片 key
 function idbBatchDelete(keys) {
-  return new Promise((resolve) => {
-    if (!keys.length) { resolve(0); return; }
-    const req = indexedDB.open(IMG_DB_NAME, 1);
-    req.onsuccess = () => {
-      const db = req.result;
-      const tx = db.transaction(IMG_DB_STORE, 'readwrite');
-      const store = tx.objectStore(IMG_DB_STORE);
-      let deleted = 0;
-      keys.forEach(key => {
-        const delReq = store.delete(key);
-        delReq.onsuccess = () => deleted++;
-        delReq.onerror = () => {};
-      });
-      tx.oncomplete = () => { db.close(); resolve(deleted); };
-      tx.onerror = () => { db.close(); resolve(deleted); };
-    };
-    req.onerror = () => resolve(0);
-  });
+  if (!keys.length) return Promise.resolve(0);
+  return openImgDB().then(db => new Promise((resolve) => {
+    const tx = db.transaction(IMG_DB_STORE, 'readwrite');
+    const store = tx.objectStore(IMG_DB_STORE);
+    let deleted = 0;
+    keys.forEach(key => {
+      const delReq = store.delete(key);
+      delReq.onsuccess = () => deleted++;
+      delReq.onerror = () => {};
+    });
+    tx.oncomplete = () => resolve(deleted);
+    tx.onerror = () => resolve(deleted);
+  }));
 }
 
-// 删除孤儿图片：传入被删题目引用的文件名列表，检查剩余题库是否还在使用，无引用则删除 IDB 缓存
+// 删除孤儿图片：删除题目后调用（此时 totalBank 已重建）
+// 直接委托 cleanOrphanImages 扫描剩余题库，只要还有任何题引用该图就不会删
 async function deleteQuestionImages(fnames) {
-  if (!fnames || !fnames.length) return;
-  // 收集剩余题目还在使用的文件名（此时 totalBank 应已重建，不含被删题目）
-  const stillUsed = new Set();
-  for (const q of totalBank) {
-    for (const p of getLocalImagePaths(q)) stillUsed.add(getFname(p));
-  }
-  // 只删无引用的孤儿文件名
-  const orphans = fnames.filter(fn => !stillUsed.has(fn));
-  if (orphans.length) {
-    const deleted = await idbBatchDelete(orphans);
-    if (deleted) console.log(`已清理 ${deleted} 张孤儿图片`);
-  }
+  return cleanOrphanImages();
 }
 
 // 清空 IDB 中所有图片
 function idbClearAll() {
-  return new Promise((resolve) => {
-    const req = indexedDB.open(IMG_DB_NAME, 1);
-    req.onsuccess = () => {
-      const db = req.result;
-      const tx = db.transaction(IMG_DB_STORE, 'readwrite');
-      const store = tx.objectStore(IMG_DB_STORE);
-      store.clear();
-      tx.oncomplete = () => { db.close(); resolve(); };
-      tx.onerror = () => { db.close(); resolve(); };
-    };
-    req.onerror = () => resolve();
-  });
+  return openImgDB().then(db => new Promise((resolve) => {
+    const tx = db.transaction(IMG_DB_STORE, 'readwrite');
+    const store = tx.objectStore(IMG_DB_STORE);
+    store.clear();
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => resolve();
+  }));
 }
 
 // 图片加载失败时回调：尝试从 IDB 读取缓存并替换 src
@@ -1562,58 +1552,59 @@ async function resolveLocalImages(newData) {
   for (const q of newData) {
     for (const p of getLocalImagePaths(q)) needFnames.add(getFname(p));
   }
-  if (!needFnames.size) return;
+  if (!needFnames.size) {
+    showToast('📷', '未检测到本地图片引用，无需导入');
+    return;
+  }
 
   // 预查 IDB 缓存
   const existsSet = await idbBatchCheck([...needFnames]);
   const toFetch = new Set([...needFnames].filter(fn => !existsSet.has(fn)));
   if (!toFetch.size) {
-    showToast('📷', `图片已全部缓存（${existsSet.size} 张），跳过`);
+    showToast('📷', `图片已全部缓存（${existsSet.size} 张），无需导入`);
     return;
   }
 
-  // 弹窗让用户点按钮 → 新鲜的用户手势 → input.click() 不会被拦截
+  // 弹窗 → 用户点击 label 触发文件选择器（input 内嵌在 DOM 中，兼容云端安全策略）
+  const uid = '_imgDlg_' + Date.now();
   const overlay = document.createElement('div');
+  overlay.id = uid;
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:99999;display:flex;align-items:center;justify-content:center;';
-  overlay.innerHTML = `<div style="background:#fff;border-radius:16px;padding:36px 32px 28px;text-align:center;max-width:380px;width:90%;box-shadow:0 12px 40px rgba(0,0,0,0.25);font-family:system-ui,-apple-system,sans-serif;">
-    <div style="font-size:48px;margin-bottom:12px;line-height:1;">✅</div>
-    <div style="font-size:18px;font-weight:700;margin-bottom:6px;color:#1a1a1a;">题库导入完成</div>
-    <div style="font-size:14px;color:#888;margin-bottom:8px;line-height:1.5;">检测到 <b style="color:#FF8F00;">${needFnames.size}</b> 个图片引用</div>
-    <div style="font-size:13px;color:#aaa;margin-bottom:20px;line-height:1.5;">第二步：请手动点击按钮选择图片文件<br>（打开文件夹后按住 <b>Ctrl+A</b> 全选即可）</div>
-    <button id="_imgPickBtn" style="display:block;width:100%;background:var(--primary,#FF8F00);color:#fff;border:none;padding:14px 0;border-radius:10px;font-size:17px;font-weight:600;cursor:pointer;margin-bottom:10px;">选择图片文件</button>
-    <button id="_imgSkipBtn" style="display:block;width:100%;background:transparent;border:none;color:#aaa;font-size:14px;cursor:pointer;padding:8px 0;">跳过（稍后导入）</button>
+  overlay.innerHTML = `<div style="background:#fff;border-radius:16px;padding:36px 32px 28px;text-align:center;max-width:420px;width:90%;box-shadow:0 12px 40px rgba(0,0,0,0.25);font-family:system-ui,-apple-system,sans-serif;">
+    <div style="font-size:48px;margin-bottom:12px;line-height:1;">🖼️</div>
+    <div style="font-size:18px;font-weight:700;margin-bottom:6px;color:#1a1a1a;">导入图片</div>
+    <div style="font-size:14px;color:#888;margin-bottom:8px;line-height:1.5;">题库引用了 <b style="color:#FF8F00;">${needFnames.size}</b> 个图片文件${existsSet.size ? `（已缓存 <b>${existsSet.size}</b> 个）` : ''}</div>
+    <div style="font-size:13px;color:#aaa;margin-bottom:20px;line-height:1.5;">请选择本地图片文件<br>（按住 <b>Ctrl+A</b> 全选文件夹内所有图片）</div>
+    <label for="${uid}_file" style="display:block;width:100%;background:var(--primary,#FF8F00);color:#fff;border:none;padding:14px 0;border-radius:10px;font-size:17px;font-weight:600;cursor:pointer;margin-bottom:10px;">📁 选择图片文件</label>
+    <input type="file" id="${uid}_file" multiple accept="image/*" style="position:absolute;opacity:0;pointer-events:none;width:0;height:0;">
+    <button id="${uid}_skip" style="display:block;width:100%;background:transparent;border:none;color:#aaa;font-size:14px;cursor:pointer;padding:8px 0;">跳过（稍后导入）</button>
   </div>`;
   document.body.appendChild(overlay);
 
   let files = null;
   try {
     files = await new Promise((resolve) => {
-      const skipBtn = document.getElementById('_imgSkipBtn');
-      const pickBtn = document.getElementById('_imgPickBtn');
+      const skipBtn = document.getElementById(uid + '_skip');
+      const fileInput = document.getElementById(uid + '_file');
       skipBtn.onclick = () => { document.body.removeChild(overlay); resolve(null); };
-      pickBtn.onclick = () => {
-        // ✅ 用户点了按钮 → 新鲜的用户手势 → input.click() 正常工作
-        const imgInput = document.createElement('input');
-        imgInput.type = 'file';
-        imgInput.multiple = true;
-        imgInput.accept = 'image/*';
-        imgInput.onchange = () => { document.body.removeChild(overlay); resolve(imgInput.files); };
-        imgInput.click();
-      };
+      fileInput.onchange = () => { document.body.removeChild(overlay); resolve(fileInput.files); };
     });
   } catch (_) {
     if (overlay.parentNode) document.body.removeChild(overlay);
     return;
   }
-  if (!files || !files.length) return;
+  if (!files || !files.length) {
+    showToast('📷', '未选择图片，可稍后再次导入');
+    return;
+  }
 
   // 按文件名小写匹配，跳过无关文件和已缓存文件
   const fileMap = new Map(); // key: 小写文件名 → dataURL
   const readPromises = [];
-  let skippedFiles = 0;
+  let skippedFiles = 0, duplicateFiles = 0;
   for (const f of files) {
     const fn = f.name.toLowerCase();
-    if (fileMap.has(fn)) continue;
+    if (fileMap.has(fn)) { duplicateFiles++; continue; }
     if (!toFetch.has(fn)) { skippedFiles++; continue; }
     readPromises.push(new Promise((resolve) => {
       const reader = new FileReader();
@@ -1629,20 +1620,150 @@ async function resolveLocalImages(newData) {
   for (const [fn, dataUrl] of fileMap) entries.push([fn, dataUrl]);
   if (entries.length) {
     await idbBatchSet(entries);
-    showToast('📷', `已缓存 ${entries.length} 张新图片（跳过 ${existsSet.size} 张已缓存，忽略 ${skippedFiles} 张无关文件）`);
+    let msg = `成功导入 ${entries.length} 张图片`;
+    if (existsSet.size) msg += `（+${existsSet.size} 张已缓存`;
+    if (skippedFiles) msg += `，忽略 ${skippedFiles} 个无关文件`;
+    if (existsSet.size) msg += `）`;
+    showToast('📷', msg);
   } else {
-    showToast('📷', '图片已全部缓存，跳过');
+    const sampleNames = [...toFetch].slice(0, 3).join(', ');
+    showToast('⚠️', `未匹配到需要的图片！需要的文件如：${sampleNames}${toFetch.size > 3 ? ' 等' : ''}（选择了 ${files.length} 个文件，${skippedFiles} 个不匹配${duplicateFiles ? '，' + duplicateFiles + ' 个重复' : ''}）`);
   }
 }
 
 // ===== 云端独立导入图片（第二步）=====
-// 与导入题库分开，独立用户手势 → 云端HTTPS不受限
+// 按题目ID匹配：图片文件名去掉扩展名和已知前缀后 = 题目ID
+// 支持文件名带前缀（如 【错题本】06-0509-1_01.png → 题目ID "06-0509-1_01"）
+// 用弹窗+label触发，绕过浏览器对input.click()的拦截（file://和HTTPS都会拦）
 async function importImagesStandalone() {
   if (!totalBank || !totalBank.length) {
     showToast('⚠️', '请先导入题库（第一步），再导入图片（第二步）');
     return;
   }
-  await resolveLocalImages(totalBank);
+
+  // 预构建映射表：从题库「图片」列提取文件名 -> 对应题目ID列表
+  // 核心原理：题库图片列是最准确映射，一张图可对应多道题（父子题共享）
+  const imgFileToQids = new Map(); // 图片文件名(去扩展名) -> [题目ID, ...]
+  let imgColCount = 0;
+  totalBank.forEach(q => {
+    const rawImg = String(q['图片'] || '').trim();
+    if (!rawImg) return; // 图片列为空 = 不需要配图
+    imgColCount++;
+    rawImg.split('|').map(s => s.trim()).filter(Boolean).forEach(path => {
+      const fname = path.replace(/\\/g, '/').split('/').pop();
+      const lastDot = fname.lastIndexOf('.');
+      const nameNoExt = lastDot > 0 ? fname.substring(0, lastDot).trim() : fname.trim();
+      if (!nameNoExt) return;
+      if (!imgFileToQids.has(nameNoExt)) imgFileToQids.set(nameNoExt, []);
+      imgFileToQids.get(nameNoExt).push(String(q['题目ID']).trim());
+    });
+  });
+  console.log('[图片导入] 题库有图片列 ' + imgColCount + ' 条，映射 ' + imgFileToQids.size + ' 个文件名');
+  if (imgFileToQids.size > 0) {
+    Array.from(imgFileToQids.keys()).slice(0, 5).forEach(k =>
+      console.log('  示例: ' + k + ' -> ' + imgFileToQids.get(k).join(', ')));
+  }
+
+  // 弹窗：用户点击 label → 真实手势触发文件选择器（不会被拦截）
+  const dlgId = '_imgImport_' + Date.now();
+  const overlay = document.createElement('div');
+  overlay.id = dlgId;
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:99999;display:flex;align-items:center;justify-content:center;';
+  overlay.innerHTML =
+    '<div style="background:#fff;border-radius:16px;padding:36px 32px 28px;text-align:center;max-width:420px;width:90%;box-shadow:0 12px 40px rgba(0,0,0,0.25);font-family:system-ui,-apple-system,sans-serif;">' +
+      '<div style="font-size:48px;margin-bottom:12px;line-height:1;">🖼️</div>' +
+      '<div style="font-size:18px;font-weight:700;margin-bottom:6px;color:#1a1a1a;">导入图片</div>' +
+      '<div style="font-size:13px;color:#888;margin-bottom:8px;line-height:1.5;">根据题库图片列自动匹配（一张图可配多道题）</div>' +
+      '<div style="font-size:13px;color:#aaa;margin-bottom:20px;line-height:1.5;">请选择本地图片文件<br>（按住 Ctrl+A 全选文件夹内所有图片）</div>' +
+      '<label for="' + dlgId + '_file" style="display:block;width:100%;background:#FF8F00;color:#fff;border:none;padding:14px 0;border-radius:10px;font-size:17px;font-weight:600;cursor:pointer;margin-bottom:10px;">📁 选择图片文件</label>' +
+      '<input type="file" id="' + dlgId + '_file" multiple accept="image/*" style="position:absolute;opacity:0;pointer-events:none;width:0;height:0;">' +
+      '<button id="' + dlgId + '_skip" style="display:block;width:100%;background:transparent;border:none;color:#aaa;font-size:14px;cursor:pointer;padding:8px 0;">跳过</button>' +
+    '</div>';
+  document.body.appendChild(overlay);
+
+  let files = null;
+  try {
+    files = await new Promise((resolve) => {
+      document.getElementById(dlgId + '_skip').onclick = () => { closeDlg(); resolve(null); };
+      document.getElementById(dlgId + '_file').onchange = (e) => { closeDlg(); resolve(e.target.files); };
+    });
+  } catch (_) {
+    closeDlg();
+    return;
+  }
+
+  function closeDlg() {
+    var o = document.getElementById(dlgId);
+    if (o && o.parentNode) o.parentNode.removeChild(o);
+  }
+
+  if (!files || !files.length) {
+    showToast('📷', '未选择图片');
+    return;
+  }
+
+  const sampleNames = Array.from(files).slice(0, 3).map(f => f.name);
+  console.log('[图片导入] 选择了 ' + files.length + ' 个文件，前3个: ' + sampleNames.join(' | '));
+
+  let successCount = 0;
+  let skipCount = 0;
+  const allEntries = [];
+  for (const file of files) {
+    const fileName = file.name;
+    const lastDot = fileName.lastIndexOf('.');
+    const rawName = lastDot > 0 ? fileName.substring(0, lastDot).trim() : fileName.trim();
+
+    // 第1步：精确匹配（文件名 = 题库图片列中的文件名）
+    let qids = imgFileToQids.get(rawName);
+
+    // 第2步：归一化匹配（-/_互换）兼容分隔符差异
+    if (!qids) {
+      const normName = rawName.replace(/-/g, '_');
+      for (const [imgName, mappedQids] of imgFileToQids) {
+        if (imgName.replace(/-/g, '_') === normName) { qids = mappedQids; break; }
+      }
+    }
+
+    if (!qids || qids.length === 0) {
+      console.log('[图片导入] 跳过（题库未引用）: ' + fileName);
+      skipCount++;
+      continue;
+    }
+
+    // 读图
+    const dataUrl = await new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.readAsDataURL(file);
+    });
+
+    // 用每个题目ID作key存入IDB（父子题共享同一张图）
+    qids.forEach(qid => {
+      allEntries.push([qid, dataUrl]);
+    });
+    // 同时用图片文件名也存一份（备用查找）
+    allEntries.push([rawName, dataUrl]);
+    successCount++;
+    console.log('[图片导入] OK: ' + fileName + ' -> ' + qids.length + '题 (' + qids.join(', ') + ')');
+  }
+  // 数据全部就绪后写入IDB
+  if (allEntries.length) {
+    try {
+      await idbBatchSet(allEntries);
+    } catch (err) {
+      console.error('[图片导入] IDB写入失败:', err);
+      showToast('⚠️', '图片写入失败，请F12查看控制台');
+      return;
+    }
+    let msg = '✅ 成功导入 ' + successCount + ' 张图片';
+    if (skipCount > 0) msg += '，跳过 ' + skipCount + ' 张（题库未引用）';
+    showToast('📷', msg);
+    if (typeof loadQuestion === 'function') loadQuestion();
+  } else if (skipCount === files.length) {
+    showToast('⚠️', '所选图片均未被题库引用（图片列为空表示不需要配图）');
+  } else {
+    showToast('⚠️', '未读取到任何图片数据');
+  }
 }
 
 // ============================ 合并/保存辅助 ============================
@@ -3689,18 +3810,29 @@ function renderQuestion() {
     if(wc > 0) tagsHtml += `<span class="badge" style="background:var(--error-bg);color:var(--error);font-weight:600;">❌ 已错 ${wc} 次</span>`;
   }
   document.getElementById('qTags').innerHTML = tagsHtml;
-  const imgWrap = document.getElementById('qImageWrap');
-  if(q['图片']) {
-    const imgs = String(q['图片']).split('|').map(s=>s.trim()).filter(Boolean);
-    imgWrap.innerHTML = imgs.map(rawSrc => {
-      // 非本地路径直接用；本地路径先写 rawSrc，异步查 IDB 后替换
-      const needsResolve = !rawSrc.startsWith('data:') && !rawSrc.startsWith('http') && !rawSrc.startsWith('blob:');
-      const imgFname = needsResolve ? getFname(rawSrc) : '';
-      return `<img class="q-image" src="${escapeHtml(rawSrc)}" data-imgid="${imgFname}" data-rawsrc="${escapeHtml(rawSrc)}" onclick="openLightbox(this.src)" title="点击放大" style="margin:4px 0;" onerror="if(this.dataset.imgid) resolveImgTag(this);">`;
-    }).join('');
-    imgWrap.style.display = 'block';
-    // 异步解析所有本地图片路径，解析后直接替换 img src
-    (async () => {
+  // 图片显示：优先按题目ID查IDB，再按图片字段走旧逻辑
+  (async () => {
+    const imgWrap = document.getElementById('qImageWrap');
+    const _qid = q['题目ID'];
+    // 1. 优先按题目ID直接查IDB（与 importImagesStandalone 存储方式一致）
+    if (_qid) {
+      const cached = await idbGetImage(_qid);
+      if (cached) {
+        imgWrap.innerHTML = '<img class="q-image" src="' + cached + '" onclick="openLightbox(this.src)" title="点击放大" style="max-width:100%;margin:4px 0;">';
+        imgWrap.style.display = 'block';
+        return;
+      }
+    }
+    // 2. 降级：按图片字段走原有逻辑
+    if (q['图片']) {
+      const imgs = String(q['图片']).split('|').map(s=>s.trim()).filter(Boolean);
+      imgWrap.innerHTML = imgs.map(rawSrc => {
+        const needsResolve = !rawSrc.startsWith('data:') && !rawSrc.startsWith('http') && !rawSrc.startsWith('blob:');
+        const imgFname = needsResolve ? getFname(rawSrc) : '';
+        return '<img class="q-image" src="' + escapeHtml(rawSrc) + '" data-imgid="' + imgFname + '" data-rawsrc="' + escapeHtml(rawSrc) + '" onclick="openLightbox(this.src)" title="点击放大" style="margin:4px 0;" onerror="if(this.dataset.imgid) resolveImgTag(this);">';
+      }).join('');
+      imgWrap.style.display = 'block';
+      // 异步解析本地图片路径
       const imgEls = imgWrap.querySelectorAll('img[data-imgid]');
       for (const el of imgEls) {
         const rawSrc = el.dataset.rawsrc;
@@ -3709,8 +3841,11 @@ function renderQuestion() {
         const cached = await idbGetImage(getFname(rawSrc));
         if (cached) el.src = cached;
       }
-    })();
-  } else { imgWrap.innerHTML = ''; imgWrap.style.display = 'none'; }
+    } else {
+      imgWrap.innerHTML = '';
+      imgWrap.style.display = 'none';
+    }
+  })();
   
   const noteArea = document.getElementById('noteArea');
   if(noteArea) noteArea.value = q['笔记'] || '';
