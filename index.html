@@ -1887,7 +1887,8 @@ async function syncCloudData() {
   await _doSyncCloud();
 }
 async function _doSyncCloud() {
-  if (!REMOTE_URL) return;
+  if (!REMOTE_URL) return false;
+  var synced = false;
   // 统一用内部函数处理同步逻辑，fetch 和 XHR 共用
   async function doSync(jsonText) {
     try {
@@ -1913,16 +1914,22 @@ async function _doSyncCloud() {
         }
         saveBank();
         localStorage.setItem(LS.version, remoteVersion);
-        showToast('☁️', `云端同步完成：${cb_cloud.length}题通用题库已更新`);
+        showToast('☁️', '云端同步完成：' + cb_cloud.length + '题通用题库已更新');
         refreshHome();
+        synced = true;
+      } else if (!needSync) {
+        showToast('☁️', '已是最新，无需同步（' + cb_cloud.length + '题云端题库）');
       }
-    } catch(e) { console.log('云端数据解析失败', e.message); }
+    } catch(e) {
+      console.log('云端数据解析失败', e.message);
+      showToast('⚠️', '云端数据解析失败：' + e.message);
+    }
   }
 
   try {
     // 方式1：尝试 fetch（HTTP/HTTPS 环境）
     const resp = await fetch(REMOTE_URL + '?t=' + Date.now(), { cache: 'no-cache' });
-    if (resp.ok) { await doSync(await resp.text()); return; }
+    if (resp.ok) { await doSync(await resp.text()); return synced; }
   } catch(e) { /* fetch 失败，降级到 XHR */ }
 
   // 方式2：file:// 下 fetch 被 CORS 拦截，改用 XMLHttpRequest 读本地文件
@@ -1935,12 +1942,15 @@ async function _doSyncCloud() {
         // file:// 下 status 为 0 视为成功
         if (xhr.status === 0 || (xhr.status >= 200 && xhr.status < 300)) {
           doSync(xhr.responseText).then(resolve);
-        } else { resolve(); }
+        } else { showToast('⚠️', '云端文件读取失败（HTTP ' + xhr.status + '）'); resolve(); }
       };
-      xhr.onerror = () => resolve();
-      try { xhr.send(); } catch(e) { resolve(); }
+      xhr.onerror = () => { showToast('⚠️', '云端文件读取失败，请检查网络或文件路径'); resolve(); };
+      try { xhr.send(); } catch(e) { showToast('⚠️', '云端文件读取异常'); resolve(); }
     });
+  } else {
+    showToast('⚠️', '云端同步失败，请检查网络连接');
   }
+  return synced;
 }
 setTimeout(_doSyncCloud, 500);
 
@@ -3258,15 +3268,29 @@ async function restoreData() {
       }
 
       const restoreRecords = data.records || [];
-      // 云端题保护：备份有云端题则用备份的；备份无云端题则保留当前浏览器里的云端题
+      // 云端题智能合并：备份云题 + 当前浏览器云题 按题目ID去重合并，保留刷题统计
       const backupCloud = data.cb_cloud || data.totalBank || [];
-      let restoreCloud;
-      if (backupCloud.length > 0) {
-        restoreCloud = backupCloud; // 备份有云题，正常恢复
-      } else {
-        restoreCloud = cb_cloud.slice(); // 备份无云题，保留现有云端题不动
-        if (restoreCloud.length > 0) showToast('☁️', `已保留云端题库 ${restoreCloud.length} 题（备份中无云端数据）`);
+      var mergedCloud = [];
+      var cloudMap = new Map();
+      // 先加入当前浏览器已有的云题（保留刷题统计）
+      for (const q of cb_cloud) { cloudMap.set(String(q['题目ID']).trim(), q); }
+      // 再用备份云题合并（按题目ID覆盖，但保留刷题统计）
+      var mergedNew = 0;
+      for (const q of backupCloud) {
+        var qid = String(q['题目ID']).trim();
+        var existing = cloudMap.get(qid);
+        if (existing) {
+          // 保留刷题统计，用备份的题目内容更新
+          var stats = { '刷题次数': existing['刷题次数']||0, '正确次数': existing['正确次数']||0, '正确率': existing['正确率']||'0%', '最后刷题时间': existing['最后刷题时间']||'', '笔记': existing['笔记']||'', '最后修改时间': existing['最后修改时间']||'' };
+          Object.assign(existing, q, stats);
+        } else {
+          cloudMap.set(qid, q);
+          mergedNew++;
+        }
       }
+      mergedCloud = Array.from(cloudMap.values());
+      if (mergedNew > 0) showToast('☁️', '智能合并：新增 ' + mergedNew + ' 题云端题（共 ' + mergedCloud.length + ' 题）');
+      const restoreCloud = mergedCloud;
       const restorePersonal = data.cb_personal || [];
       const restoreWrong = data.wrongList || [];
       const restoreFavs = data.favList || [];
