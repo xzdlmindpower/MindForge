@@ -181,7 +181,7 @@ body {
 .tag.active { background: var(--gold); color: #fff; border-color: var(--gold); }
 .tag-subject.active { background: var(--blue); border-color: var(--blue); }
 .subject-category { margin-bottom: 4px; }
-.subject-cat-label { font-size: 11px; color: var(--text-hint); margin-right: 6px; font-weight: 500; }
+.subject-cat-label { font-size: 11px; color: #6B3FA0; margin-right: 6px; font-weight: 500; }
 .subject-tags-row { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .subject-tags-row .tag-subject { font-size: 12px; padding: 3px 10px; }
 .subject-more-btn {
@@ -1253,7 +1253,7 @@ body {
 
 <script>
 // ============================ 版本号 ============================
-var APP_VERSION = '6.12'; // 每次发版必须同步更新 version.json
+var APP_VERSION = '6.13'; // 每次发版必须同步更新 version.json
 
 // ============================ 存储 keys ============================
 const LS = {
@@ -1796,6 +1796,9 @@ function rebuildTotalBank() {
   totalBankMap = new Map(totalBank.map(q => [q['题目ID'], q]));
 }
 function saveBank() {
+  var sortById = function(a, b) { return String(a['题目ID'] || '').localeCompare(String(b['题目ID'] || '')); };
+  cb_cloud.sort(sortById);
+  cb_personal.sort(sortById);
   saveData(LS.cloud, cb_cloud);
   saveData(LS.personal, cb_personal);
   rebuildTotalBank();
@@ -3044,6 +3047,11 @@ async function importExcelOrCSV() {
       }
     }
 
+    // 导入后按题目ID排序
+    var sortById = function(a, b) { return String(a['题目ID'] || '').localeCompare(String(b['题目ID'] || '')); };
+    cb_cloud.sort(sortById);
+    cb_personal.sort(sortById);
+
     saveBank();
     const parts = [];
     if (added) parts.push(`新增 ${added}题`);
@@ -3499,7 +3507,7 @@ function updateSubjectTags() {
   if(!subjects.length) { container.innerHTML = ''; return; }
 
   // 学科分类规则：按学科名归类
-  const K12 = ['语文','数学','英语','物理','化学','生物','历史','地理','政治','道德与法治','科学','信息技术','体育','音乐','美术'];
+  const K12 = ['语文','数学','英语','物理','化学','地理','生物','政治','历史','道德与法治','科学','信息技术','体育','音乐','美术'];
   const VOCATIONAL = ['营养师','AI训练师','心理咨询师','健康管理师','人力资源管理师','会计','护士','教师资格','消防工程师','建造师','法律职业','社会工作师','计算机','电工','育婴师','养老护理员','中式烹调师','西式面点师','茶艺师','理财规划师'];
   const k12Set = new Set(K12.map(s=>s.toLowerCase()));
   const vocSet = new Set(VOCATIONAL.map(s=>s.toLowerCase()));
@@ -3520,9 +3528,11 @@ function updateSubjectTags() {
   }
   if (others.length) groups['其他'] = others;
 
-  // 每个 class 内按学科数量排序（多的在前）
-  for (const cat of Object.keys(groups)) {
-    // 不排序，保持原 subjects 顺序即可
+  // K12 按学科编号排序（数组 index），职业技能按出现顺序
+  if (groups['K12']) {
+    var k12Idx = {};
+    K12.forEach(function(s, i) { k12Idx[s] = i; });
+    groups['K12'].sort(function(a, b) { return (k12Idx[a] != null ? k12Idx[a] : 99) - (k12Idx[b] != null ? k12Idx[b] : 99); });
   }
 
   const SHOW_LIMIT = 6; // 每个分类默认显示几个
@@ -3534,19 +3544,17 @@ function updateSubjectTags() {
   for (const [cat, items] of Object.entries(groups)) {
     const needCollapse = items.length > SHOW_LIMIT;
     const catId = 'subjCat_' + cat.replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g,'');
-    html += `<span class="subject-category">`;
-    if (Object.keys(groups).length > 1) {
-      html += `<span class="subject-cat-label">${cat}：</span>`;
-    }
-    html += `<span class="subject-tags-row" id="${catId}">`;
+    html += '<span class="subject-category">';
+    html += '<span class="subject-cat-label">' + cat + '：</span>';
+    html += '<span class="subject-tags-row" id="' + catId + '">';
     items.forEach((s, i) => {
       const hidden = (needCollapse && i >= SHOW_LIMIT) ? ' subject-hidden' : '';
-      html += `<span class="tag tag-subject${filterSubject===s?' active':''}${hidden}" onclick="filterBySubjectTag('${escapeHtml(s)}', this)">${escapeHtml(s)}</span>`;
+      html += '<span class="tag tag-subject' + (filterSubject === s ? ' active' : '') + hidden + '" onclick="filterBySubjectTag(\'' + escapeHtml(s) + '\', this)">' + escapeHtml(s) + '</span>';
     });
     if (needCollapse) {
-      html += `<span class="subject-more-btn" onclick="toggleSubjectCategory('${catId}', this)"></span>`;
+      html += '<span class="subject-more-btn" onclick="toggleSubjectCategory(\'' + catId + '\', this)"></span>';
     }
-    html += `</span></span> `;
+    html += '</span></span> ';
   }
 
   container.innerHTML = html;
