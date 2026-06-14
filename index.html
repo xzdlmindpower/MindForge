@@ -1253,7 +1253,7 @@ body {
 
 <script>
 // ============================ 版本号 ============================
-var APP_VERSION = '6.8'; // 每次发版必须同步更新 version.json
+var APP_VERSION = '6.10'; // 每次发版必须同步更新 version.json
 
 // ============================ 存储 keys ============================
 const LS = {
@@ -1886,7 +1886,7 @@ async function syncCloudData() {
   showToast('☁️', '正在同步云端数据...');
   await _doSyncCloud(true);
 }
-async function _doSyncCloud(force) {
+async function _doSyncCloud(force, mergeOnly) {
   if (!REMOTE_URL) return false;
   var synced = false;
   // 统一用内部函数处理同步逻辑，fetch 和 XHR 共用
@@ -1898,6 +1898,7 @@ async function _doSyncCloud(force) {
       const cloudQuestions = data.questions || data.totalBank || [];
       const needSync = force || (remoteVersion && remoteVersion !== localVersion) || (cloudQuestions.length > 0 && cb_cloud.length === 0);
       if (needSync && cloudQuestions.length) {
+        // 合并策略：保留本地已有云题（不丢题），用远端更新内容，新增远端独有题
         const oldStats = {};
         for (const q of cb_cloud) {
           oldStats[q['题目ID']] = {
@@ -1906,17 +1907,41 @@ async function _doSyncCloud(force) {
             '笔记': q['笔记']||'', '最后修改时间': q['最后修改时间']||''
           };
         }
-        cb_cloud = cloudQuestions;
+        // 用远端题目构建合并后的云题（按题目ID去重）
+        const mergedMap = new Map();
+        // 先加入本地已有云题（保证不丢）
+        for (const q of cb_cloud) { mergedMap.set(String(q['题目ID']).trim(), q); }
+        // 再用远端更新/新增
+        var newFromRemote = 0;
+        for (const q of cloudQuestions) {
+          var qid = String(q['题目ID']).trim();
+          var existing = mergedMap.get(qid);
+          if (existing) {
+            if (mergeOnly) {
+              // 恢复后同步：本地已有不动，只补远端独有新题
+              continue;
+            }
+            // 日常同步：用远端内容更新，但保留刷题统计
+            var stats = oldStats[qid] || { '刷题次数':0, '正确次数':0, '正确率':'0%', '最后刷题时间':'', '笔记':'', '最后修改时间':'' };
+            Object.assign(existing, q, stats);
+          } else {
+            // 远端独有新题
+            mergedMap.set(qid, q);
+            newFromRemote++;
+          }
+        }
+        cb_cloud = Array.from(mergedMap.values());
         for (const q of cb_cloud) {
-          const s = oldStats[q['题目ID']];
-          if (s) Object.assign(q, s);
-          else { q['刷题次数']=0; q['正确次数']=0; q['正确率']='0%'; q['最后刷题时间']=''; q['笔记']=''; q['最后修改时间']=''; }
+          if (q['刷题次数'] === undefined) { q['刷题次数']=0; q['正确次数']=0; q['正确率']='0%'; q['最后刷题时间']=''; q['笔记']=''; q['最后修改时间']=''; }
         }
         saveBank();
         localStorage.setItem(LS.version, remoteVersion);
-        showToast('☁️', '云端同步完成：' + cb_cloud.length + '题通用题库已更新');
+        var syncMsg = newFromRemote > 0
+          ? '云端同步完成：' + cb_cloud.length + '题（新增 ' + newFromRemote + ' 题）'
+          : (mergeOnly ? '云端同步完成：' + cb_cloud.length + '题（以本地为准，无新增）' : '云端同步完成：' + cb_cloud.length + '题（已合并最新内容）');
+        showToast('☁️', syncMsg);
         refreshHome();
-        synced = true;
+        synced = newFromRemote;
       } else if (!needSync) {
         showToast('☁️', '已是最新，无需同步（' + cb_cloud.length + '题云端题库）');
       }
@@ -3274,15 +3299,15 @@ async function restoreData() {
       var cloudMap = new Map();
       // 先加入当前浏览器已有的云题（保留刷题统计）
       for (const q of cb_cloud) { cloudMap.set(String(q['题目ID']).trim(), q); }
-      // 再用备份云题合并（按题目ID覆盖，但保留刷题统计）
+      // 再用备份云题合并：本地已有不动，只补新题，智能合并笔记
       var mergedNew = 0;
       for (const q of backupCloud) {
         var qid = String(q['题目ID']).trim();
         var existing = cloudMap.get(qid);
         if (existing) {
-          // 保留刷题统计，用备份的题目内容更新
-          var stats = { '刷题次数': existing['刷题次数']||0, '正确次数': existing['正确次数']||0, '正确率': existing['正确率']||'0%', '最后刷题时间': existing['最后刷题时间']||'', '笔记': existing['笔记']||'', '最后修改时间': existing['最后修改时间']||'' };
-          Object.assign(existing, q, stats);
+          // 本地已有：保留浏览器内容，智能合并笔记（浏览器无笔记→备份有则补入）
+          var bkpNotes = q['笔记'] || '';
+          if (bkpNotes && !existing['笔记']) { existing['笔记'] = bkpNotes; }
         } else {
           cloudMap.set(qid, q);
           mergedNew++;
@@ -3357,11 +3382,17 @@ async function restoreData() {
       lastBackupDate = new Date().toISOString();
       saveData(LS.lastBackup, lastBackupDate);
 
-      if (!errors.length) showToast('📥', '全量恢复成功（' + records.length + '条记录）');
       checkAchievements();
       refreshHome();
-      // 恢复后强制同步云端题（force=true，始终从远端拉取最新）
-      _doSyncCloud(true);
+      // 恢复后同步云端题（mergeOnly=true: 只补缺不覆盖，以本地为准）
+      var syncNew = await _doSyncCloud(true, true);
+      if (!errors.length) {
+        var restoreMsg = '全量恢复成功（' + records.length + '条记录）';
+        if (syncNew !== false) {
+          restoreMsg += ' | 云端同步：' + cb_cloud.length + '题' + (syncNew > 0 ? '（新增' + syncNew + '题）' : '（无新增）');
+        }
+        showToast('📥', restoreMsg);
+      }
     };
     reader.readAsText(file);
 }
