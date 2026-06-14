@@ -159,7 +159,13 @@ body {
 
 .filter-panel {
   background: var(--bg-alt); border-radius: var(--radius-card);
-  padding: 16px; margin-bottom: 20px;
+  padding: 16px; margin-bottom: 20px; position: relative;
+}
+.filter-panel-watermark {
+  position: absolute; left: 600px; top: 40%;
+  transform: translate(-50%, -50%);
+  width: 400px; height: auto;
+  opacity: 0.25; pointer-events: none; user-select: none;
 }
 .filter-row {
   display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
@@ -914,6 +920,7 @@ body {
 
     <!-- 练题区：最重要的功能，放在最前面 -->
     <div class="filter-panel">
+      <img class="filter-panel-watermark" src="logo.png" alt="">
       <div class="section-title">🎯 选择练题范围</div>
       <div class="filter-row">
         <span class="filter-label">学科</span>
@@ -1246,7 +1253,7 @@ body {
 
 <script>
 // ============================ 版本号 ============================
-var APP_VERSION = '6.6'; // 每次发版必须同步更新 version.json
+var APP_VERSION = '6.7'; // 每次发版必须同步更新 version.json
 
 // ============================ 存储 keys ============================
 const LS = {

@@ -1,9 +1,8 @@
 {
-  "version": "6.6",
+  "version": "6.7",
   "changes": [
-    "同步云端：去掉file://拦截，改用fetch+XHR双通道，本地和HTTP都能同步",
-    "同步云端：fetch失败自动降级XMLHttpRequest读取本地xzdl_tiku.json",
-    "全量恢复：恢复后自动触发云端同步，智能合并云题到本地",
-    "云端题删除保护：批量删除自动跳过云端题，动态文案区分云题/本地题"
+    "清空数据逻辑简化：彻底清空后由DOMContentLoaded自动同步接回云端题",
+    "DOMContentLoaded新增云端同步，每次打开页面自动拉取最新云端题库",
+    "选择练题面板添加LOGO品牌水印（半透明，不挡文字）"
   ]
 }
