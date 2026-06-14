@@ -1253,7 +1253,7 @@ body {
 
 <script>
 // ============================ 版本号 ============================
-var APP_VERSION = '6.10'; // 每次发版必须同步更新 version.json
+var APP_VERSION = '6.12'; // 每次发版必须同步更新 version.json
 
 // ============================ 存储 keys ============================
 const LS = {
@@ -3024,7 +3024,7 @@ async function importExcelOrCSV() {
 
     for (const newQ of newData) {
       const qid = newQ['题目ID'];
-      const isCloud = String(newQ['类型']||'').trim() === '通用题库';
+      const isCloud = String(newQ['类型']||'').trim() === '通用题库' || String(newQ['类型']||'').trim() === '云端题库';
 
       if (cloudMap.has(qid)) {
         const old = cloudMap.get(qid);
@@ -3457,8 +3457,9 @@ function updateFilterPreview() {
   if (delBtn) {
     if (hasFilter && filtered.length > 0) {
       delBtn.style.display = '';
-      const cloudIds = new Set(cb_cloud.map(q => q['题目ID']));
-      const filteredCloud = filtered.filter(q => cloudIds.has(q['题目ID'])).length;
+      // 按类型字段判断：通用题库/云端题库 受保护不可删，其余可删
+      var isCloudQ = function(q) { var t = String(q['类型']||'').trim(); return t === '通用题库' || t === '云端题库'; };
+      const filteredCloud = filtered.filter(isCloudQ).length;
       const filteredLocal = filtered.length - filteredCloud;
       if (filteredCloud > 0 && filteredLocal > 0) {
         delBtn.textContent = `🗑️ 删除这 ${filteredLocal} 题（跳过${filteredCloud}题云题）`;
@@ -3655,10 +3656,10 @@ function filterByReasonTag(val) { filterReason = val || null; refreshHome(); }
 async function deleteFilteredQuestions() {
   const filtered = applyFilters(totalBank);
   if (filtered.length === 0) { showToast('', '没有匹配的题目可删除'); return; }
-  // 分离云端题和本地题
-  const cloudIds = new Set(cb_cloud.map(q => q['题目ID']));
-  const cloudQs = filtered.filter(q => cloudIds.has(q['题目ID']));
-  const localQs = filtered.filter(q => !cloudIds.has(q['题目ID']));
+  // 按类型字段判断：通用题库/云端题库 受保护不可删，其余可删
+  var isCloudQ = function(q) { var t = String(q['类型']||'').trim(); return t === '通用题库' || t === '云端题库'; };
+  const cloudQs = filtered.filter(isCloudQ);
+  const localQs = filtered.filter(function(q) { return !isCloudQ(q); });
   // 全部是云端题，拒绝删除
   if (localQs.length === 0) {
     showToast('☁️', '选中全是云端题库，受保护不可删除');
