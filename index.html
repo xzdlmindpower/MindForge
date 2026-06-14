@@ -1246,7 +1246,7 @@ body {
 
 <script>
 // ============================ 版本号 ============================
-var APP_VERSION = '6.3'; // 每次发版必须同步更新 version.json
+var APP_VERSION = '6.6'; // 每次发版必须同步更新 version.json
 
 // ============================ 存储 keys ============================
 const LS = {
@@ -1880,18 +1880,16 @@ async function syncCloudData() {
   await _doSyncCloud();
 }
 async function _doSyncCloud() {
-  if (!REMOTE_URL) return; // 未配置云端地址，跳过
-  if (window.location.protocol === 'file:') return; // 本地文件不支持CORS，跳过
-  try {
-    const resp = await fetch(REMOTE_URL);
-    if (!resp.ok) return;
-    const data = await resp.json();
-    const remoteVersion = data.version || '';
-    const localVersion = localStorage.getItem(LS.version) || '';
-    if (remoteVersion && remoteVersion !== localVersion) {
+  if (!REMOTE_URL) return;
+  // 统一用内部函数处理同步逻辑，fetch 和 XHR 共用
+  async function doSync(jsonText) {
+    try {
+      const data = JSON.parse(jsonText);
+      const remoteVersion = data.version || '';
+      const localVersion = localStorage.getItem(LS.version) || '';
       const cloudQuestions = data.questions || data.totalBank || [];
-      if (cloudQuestions.length) {
-        // 保存用户统计
+      const needSync = (remoteVersion && remoteVersion !== localVersion) || (cloudQuestions.length > 0 && cb_cloud.length === 0);
+      if (needSync && cloudQuestions.length) {
         const oldStats = {};
         for (const q of cb_cloud) {
           oldStats[q['题目ID']] = {
@@ -1900,7 +1898,6 @@ async function _doSyncCloud() {
             '笔记': q['笔记']||'', '最后修改时间': q['最后修改时间']||''
           };
         }
-        // 用云端数据覆盖 cb_cloud
         cb_cloud = cloudQuestions;
         for (const q of cb_cloud) {
           const s = oldStats[q['题目ID']];
@@ -1912,8 +1909,31 @@ async function _doSyncCloud() {
         showToast('☁️', `云端同步完成：${cb_cloud.length}题通用题库已更新`);
         refreshHome();
       }
-    }
-  } catch(e) { console.log('云端同步未连接（正常）', e.message); }
+    } catch(e) { console.log('云端数据解析失败', e.message); }
+  }
+
+  try {
+    // 方式1：尝试 fetch（HTTP/HTTPS 环境）
+    const resp = await fetch(REMOTE_URL + '?t=' + Date.now(), { cache: 'no-cache' });
+    if (resp.ok) { await doSync(await resp.text()); return; }
+  } catch(e) { /* fetch 失败，降级到 XHR */ }
+
+  // 方式2：file:// 下 fetch 被 CORS 拦截，改用 XMLHttpRequest 读本地文件
+  if (window.location.protocol === 'file:') {
+    const localPath = REMOTE_URL.startsWith('./') ? REMOTE_URL.slice(2) : REMOTE_URL;
+    await new Promise(resolve => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', localPath, true);
+      xhr.onload = () => {
+        // file:// 下 status 为 0 视为成功
+        if (xhr.status === 0 || (xhr.status >= 200 && xhr.status < 300)) {
+          doSync(xhr.responseText).then(resolve);
+        } else { resolve(); }
+      };
+      xhr.onerror = () => resolve();
+      try { xhr.send(); } catch(e) { resolve(); }
+    });
+  }
 }
 setTimeout(_doSyncCloud, 500);
 
@@ -3231,7 +3251,15 @@ async function restoreData() {
       }
 
       const restoreRecords = data.records || [];
-      const restoreCloud = data.cb_cloud || data.totalBank || [];
+      // 云端题保护：备份有云端题则用备份的；备份无云端题则保留当前浏览器里的云端题
+      const backupCloud = data.cb_cloud || data.totalBank || [];
+      let restoreCloud;
+      if (backupCloud.length > 0) {
+        restoreCloud = backupCloud; // 备份有云题，正常恢复
+      } else {
+        restoreCloud = cb_cloud.slice(); // 备份无云题，保留现有云端题不动
+        if (restoreCloud.length > 0) showToast('☁️', `已保留云端题库 ${restoreCloud.length} 题（备份中无云端数据）`);
+      }
       const restorePersonal = data.cb_personal || [];
       const restoreWrong = data.wrongList || [];
       const restoreFavs = data.favList || [];
@@ -3301,10 +3329,18 @@ async function restoreData() {
       if (!errors.length) showToast('📥', '全量恢复成功（' + records.length + '条记录）');
       checkAchievements();
       refreshHome();
+      // 恢复后自动同步云端题（若备份无云题，拉取云端题合并）
+      _doSyncCloud();
     };
     reader.readAsText(file);
 }
-async function confirmClear() { if(await customConfirm('⚠️ 清空所有数据？不可恢复！\n\n将清除题库、记录、图片等所有本地数据。')){ localStorage.clear(); await idbClearAll(); location.reload(); } }
+async function confirmClear() {
+  if(await customConfirm('⚠️ 清空所有本地数据？不可恢复！\n\n将清除本地题库、记录、图片等所有数据。\n清空后刷新页面会自动从云端同步题库。')) {
+    localStorage.clear();
+    await idbClearAll();
+    location.reload();
+  }
+}
 function openSettings() { applySettings(); openModal('settingsModal'); }
 function openGuide() {
   document.getElementById('guideModal').classList.add('show');
@@ -3358,7 +3394,17 @@ function updateFilterPreview() {
   const delBtn = document.getElementById('btnDeleteFiltered');
   if (delBtn) {
     if (hasFilter && filtered.length > 0) {
-      delBtn.style.display = ''; delBtn.textContent = `🗑️ 删除这 ${filtered.length} 题`;
+      delBtn.style.display = '';
+      const cloudIds = new Set(cb_cloud.map(q => q['题目ID']));
+      const filteredCloud = filtered.filter(q => cloudIds.has(q['题目ID'])).length;
+      const filteredLocal = filtered.length - filteredCloud;
+      if (filteredCloud > 0 && filteredLocal > 0) {
+        delBtn.textContent = `🗑️ 删除这 ${filteredLocal} 题（跳过${filteredCloud}题云题）`;
+      } else if (filteredCloud > 0) {
+        delBtn.textContent = `🗑️ 全部为云题，不可删除`;
+      } else {
+        delBtn.textContent = `🗑️ 删除这 ${filtered.length} 题`;
+      }
     } else {
       delBtn.style.display = 'none';
     }
@@ -3547,17 +3593,29 @@ function filterByReasonTag(val) { filterReason = val || null; refreshHome(); }
 async function deleteFilteredQuestions() {
   const filtered = applyFilters(totalBank);
   if (filtered.length === 0) { showToast('', '没有匹配的题目可删除'); return; }
-  if (!await customConfirm(`⚠️ 确定删除筛选出的 ${filtered.length} 题？此操作不可恢复！\n\n建议先导出备份。`)) return;
-  const idsToDelete = new Set(filtered.map(q => q['题目ID']));
+  // 分离云端题和本地题
+  const cloudIds = new Set(cb_cloud.map(q => q['题目ID']));
+  const cloudQs = filtered.filter(q => cloudIds.has(q['题目ID']));
+  const localQs = filtered.filter(q => !cloudIds.has(q['题目ID']));
+  // 全部是云端题，拒绝删除
+  if (localQs.length === 0) {
+    showToast('☁️', '选中全是云端题库，受保护不可删除');
+    return;
+  }
+  // 构建确认文案
+  let confirmMsg = `⚠️ 确定删除筛选出的 ${localQs.length} 题本地题？此操作不可恢复！`;
+  if (cloudQs.length > 0) confirmMsg += `\n\n☁️ 将跳过 ${cloudQs.length} 题云端题（受保护）`;
+  confirmMsg += '\n\n建议先导出备份。';
+  if (!await customConfirm(confirmMsg)) return;
+  const idsToDelete = new Set(localQs.map(q => q['题目ID']));
   // 先收集被删题目的图片文件名（必须在 rebuild 之前）
   const delFnames = new Set();
-  for (const q of filtered) {
+  for (const q of localQs) {
     for (const p of getLocalImagePaths(q)) delFnames.add(getFname(p));
   }
-  // 从cb_cloud/cb_personal移除（而非直接操作totalBank）
-  const delCloud = cb_cloud.filter(q => !idsToDelete.has(q['题目ID']));
+  // 从cb_personal移除（云端题不动）
   const delPersonal = cb_personal.filter(q => !idsToDelete.has(q['题目ID']));
-  cb_cloud = delCloud; cb_personal = delPersonal;
+  cb_personal = delPersonal;
   rebuildTotalBank();
   saveBank();
   // 清理关联数据
@@ -3572,7 +3630,9 @@ async function deleteFilteredQuestions() {
   saveData(LS.records, records);
   // 清理孤儿图片
   await deleteQuestionImages([...delFnames]);
-  showToast('🗑️', `已删除 ${filtered.length} 题`);
+  let msg = `已删除 ${localQs.length} 题本地题`;
+  if (cloudQs.length > 0) msg += `，跳过 ${cloudQs.length} 题云题`;
+  showToast('🗑️', msg);
   resetAllFilters();
 }
 function getAccuracyMap() {
@@ -4703,6 +4763,8 @@ window.addEventListener('DOMContentLoaded', () => {
   if (AUTO_UPDATE_CHECK && window.location.protocol !== 'file:') {
     setTimeout(checkForUpdate, 3000);
   }
+  // 启动时自动同步云端题库（清空数据后 reload 也走这里接回）
+  _doSyncCloud();
 });
 
 // ========== 键盘快捷键 ==========
