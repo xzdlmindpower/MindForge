@@ -1,8 +1,1 @@
-{
-  "version": "6.16",
-  "changes": [
-    "PDF导入CDN切换国内源(bootcdn)",
-    "PDF解析适配作业帮错题本格式",
-    "PDF答案提取重写+题干行结构重建"
-  ]
-}
+{"version":"6.17","desc":"file:// CORS修复: 本地模式改用script标签加载base64题库数据"}
